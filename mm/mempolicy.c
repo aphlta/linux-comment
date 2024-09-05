@@ -38,6 +38,27 @@
  *                use the process policy. This is what Linux always did
  *		  in a NUMA aware kernel and still does by, ahem, default.
  *
+ * 支持每个VMA（虚拟内存区域）和每个进程的四种策略：
+ *
+ * VMA策略在页面错误时优先于进程策略。
+ *
+ * interleave（交叉）     在一组节点上交叉分配内存，并在失败时正常回退。
+ *                对于基于VMA的分配，这基于支撑对象或匿名内存映射的偏移进行交叉。
+ *                对于进程策略，使用进程计数器。
+ *
+ * bind（绑定）           仅在特定的一组节点上分配内存，没有回退。
+ *                FIXME：内存从第一个节点开始到最后一个节点进行分配，这并不理想。
+ *                bind应该真正限制分配到内存节点上才对。
+ *
+ * preferred（优先）      在正常回退之前，先尝试特定的节点。
+ *                特殊情况：NUMA_NO_NODE表示在此本地CPU上进行分配。
+ *                这通常与默认相同，但在VMA中设置时，非默认进程策略很有用。
+ *
+ * preferred many（多优先） 在正常回退之前，先尝试一组节点。这类似于优先策略，但没有特殊情况。
+ *
+ * default（默认）        首先在本地节点上分配，或者在VMA上使用进程策略。
+ *                这是Linux在NUMA感知内核中一直所做的，并且仍然作为默认行为。
+ *
  * The process policy is applied for most non interrupt memory allocations
  * in that process' context. Interrupts ignore the policies and always
  * try to allocate on the local CPU. The VMA policy is only applied for memory
@@ -54,6 +75,19 @@
  *
  * For shmfs/tmpfs/hugetlbfs shared memory the policy is shared between
  * all users and remembered even when nobody has memory mapped.
+ * 进程策略应用于大多数非中断内存分配，在该进程的上下文中执行。
+ * 中断忽略这些策略，始终尝试在本地CPU上分配内存。
+ * VMA（Virtual Memory Area）策略仅适用于虚拟内存中的VMA内存分配。
+ *
+ * 当前在交换操作中存在一些特殊情况，策略未能应用，
+ * 但大多数情况应该已被处理。当使用进程策略时，它不会在交换出/交换入过程中被记住。
+ *
+ * 只有在区域层次结构中最高的区域才会应用策略。
+ * 请求较低区域的分配仅使用默认策略。这意味着在具有高端内存的系统上，
+ * 内核的低内存分配不会受到策略的约束。同样，GFP_DMA分配也是如此。
+ *
+ * 对于shmfs（共享内存文件系统）、tmpfs（基于内存的文件系统）和hugetlbfs（巨大页面传输层块文件系统）的共享内存，
+ * 策略在所有用户之间共享，并且即使没有用户映射内存时，策略也会被记住。
  */
 
 /* Notebook:
@@ -66,6 +100,14 @@
    grows down?
    make bind policy root only? It can trigger oom much faster and the
    kernel is not always grateful with that.
+*/
+/* Notebook:
+   修正mmap读取预取行为，确保其遵循策略，并允许任何页缓存对象使用该策略
+   为大页面提供统计信息
+   考虑为页缓存设置全局策略，当前它使用进程策略。这需要上面的第一项改动。
+   处理共享内存的mremap调用（当前策略中未考虑这一点）
+   支持页面向下增长？
+   将绑定策略限制为仅root用户？它能更快触发OOM，并且内核并不总是对此表示欢迎。
 */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -501,65 +543,97 @@ unlock:
  * -EIO - only MPOL_MF_STRICT was specified and an existing folio was already
  *        on a node that does not follow the policy.
  */
+/**
+ * queue_folios_pte_range - 为给定地址范围内的页队列进行操作
+ * @pmd: PMD表项指针
+ * @addr: 起始地址
+ * @end: 结束地址
+ * @walk: mm_walk结构体指针，包含VMA等相关信息
+ *
+ * 本函数尝试将@addr和@end指定的地址范围内的所有页加入到一个迁移或操作队列中。
+ * 它主要应用于需要对特定内存区域进行特殊处理的情况，比如内存迁移或特定内存操作。
+ * 函数依据传入的参数和当前VMA的特性执行相应的操作。
+ *
+ * 返回值:
+ * - 如果存在不可移动的页，则返回1。
+ * - 如果操作过程中没有遇到错误，但地址范围未处理完，则返回-errno。
+ * - 如果没有问题，返回0。
+ */
 static int queue_folios_pte_range(pmd_t *pmd, unsigned long addr,
 			unsigned long end, struct mm_walk *walk)
 {
+	// VMA结构体指针，用于访问和操作VMA
 	struct vm_area_struct *vma = walk->vma;
+	// folio结构体指针，代表页帧
 	struct folio *folio;
+	// queue_pages结构体指针，用于页队列操作
 	struct queue_pages *qp = walk->private;
+	// 操作标志，决定如何处理页
 	unsigned long flags = qp->flags;
+	// 标记是否存在不可移动的页
 	bool has_unmovable = false;
+	// Page table entry指针，用于操作页表
 	pte_t *pte, *mapped_pte;
+	// 临时pte变量，用于存储pte值
 	pte_t ptent;
+	// 旋锁指针，用于页表锁
 	spinlock_t *ptl;
 
+	// 尝试获取巨大的PMD锁，如果成功，则调用相应的PMD处理函数
 	ptl = pmd_trans_huge_lock(pmd, vma);
 	if (ptl)
 		return queue_folios_pmd(pmd, ptl, addr, end, walk);
 
+	// 获取并锁定页表项，如果失败，则设置行动为再次尝试，并返回
 	mapped_pte = pte = pte_offset_map_lock(walk->mm, pmd, addr, &ptl);
 	if (!pte) {
 		walk->action = ACTION_AGAIN;
 		return 0;
 	}
+	// 遍历地址范围内的每个页，执行相应的操作
 	for (; addr != end; pte++, addr += PAGE_SIZE) {
+		// 获取当前页表项
 		ptent = ptep_get(pte);
+		// 如果页表项未存在，则跳过
 		if (!pte_present(ptent))
 			continue;
+		// 获取当前地址对应的folio，如果获取失败或为设备页，则跳过
 		folio = vm_normal_folio(vma, addr, ptent);
 		if (!folio || folio_is_zone_device(folio))
 			continue;
+		// 跳过保留的页
 		/*
 		 * vm_normal_folio() filters out zero pages, but there might
 		 * still be reserved folios to skip, perhaps in a VDSO.
 		 */
 		if (folio_test_reserved(folio))
 			continue;
+		// 如果不需要队列操作当前页，则跳过
 		if (!queue_folio_required(folio, qp))
 			continue;
+		// 如果设置了移动或全部移动标志
 		if (flags & (MPOL_MF_MOVE | MPOL_MF_MOVE_ALL)) {
-			/* MPOL_MF_STRICT must be specified if we get here */
+			// 如果当前VMA不可移动，则标记有不可移动页，并跳出循环
 			if (!vma_migratable(vma)) {
 				has_unmovable = true;
 				break;
 			}
-
-			/*
-			 * Do not abort immediately since there may be
-			 * temporary off LRU pages in the range.  Still
-			 * need migrate other LRU pages.
-			 */
+			// 尝试将页添加到迁移队列，如果失败，则标记有不可移动页
 			if (migrate_folio_add(folio, qp->pagelist, flags))
 				has_unmovable = true;
 		} else
-			break;
+			break; // 如果未设置移动标志，则直接跳出循环
 	}
+	// 解锁并取消映射页表项
 	pte_unmap_unlock(mapped_pte, ptl);
+	// 条件性调度
 	cond_resched();
 
+	// 如果存在不可移动的页，则返回1
 	if (has_unmovable)
 		return 1;
 
+	// 如果地址范围未处理完，则返回错误
 	return addr != end ? -EIO : 0;
 }
 
@@ -2271,18 +2345,34 @@ EXPORT_SYMBOL(vma_alloc_folio);
  * flags are used.
  * Return: The page on success or NULL if allocation fails.
  */
+/**
+ * alloc_pages - 根据当前的内存策略分配一页或多页内存
+ * @gfp: 内存分配时的优先级标志
+ * @order: 内存块的大小，以页面为单位的2的幂
+ *
+ * 该函数根据当前的内存策略(pol)来决定如何分配内存。如果当前的策略是交叉编址，
+ * 它将在交叉编址的节点上分配页面。如果策略是指定一个优选节点，且页面分配失败，
+ * 它会尝试在优选节点上分配页面。如果以上两种情况都不符合，或者优选节点上的分配也失败，
+ * 它将根据策略的节点掩码进行页面分配。如果这些尝试都失败，它将返回NULL。
+ *
+ * 返回: 分配的页面结构的指针，如果分配失败则返回NULL。
+ */
 struct page *alloc_pages(gfp_t gfp, unsigned order)
 {
 	struct mempolicy *pol = &default_policy;
 	struct page *page;
 
+    // 如果不在中断上下文中，并且gfp标志中没有指定当前节点，尝试获取当前任务的内存策略
 	if (!in_interrupt() && !(gfp & __GFP_THISNODE))
 		pol = get_task_policy(current);
 
-	/*
-	 * No reference counting needed for current->mempolicy
-	 * nor system default_policy
-	 */
+    /*
+     * 对current->mempolicy和系统default_policy不需要引用计数
+     * 因为它们的生命周期不由引用计数控制
+     */
+
+    // 根据不同的内存策略进行页面分配
+	// alex : comment : 看起来都是和node相关的,在手机目前没有多个节点
 	if (pol->mode == MPOL_INTERLEAVE)
 		page = alloc_page_interleave(gfp, order, interleave_nodes(pol));
 	else if (pol->mode == MPOL_PREFERRED_MANY)
@@ -2297,12 +2387,27 @@ struct page *alloc_pages(gfp_t gfp, unsigned order)
 }
 EXPORT_SYMBOL(alloc_pages);
 
+/**
+ * 分配一个folio结构体。
+ *
+ * 本函数用于根据指定的内存分配顺序(order)和内存分配标志(gfp)来分配相应大小的物理页面。
+ * 如果分配的页面大小超过一页，并且order大于1，则会将这些页面转换为transhuge页面。
+ * 成功分配后，返回一个指向分配的folio结构体的指针，实际上是一个指向page的指针的类型转换。
+ *
+ * @param gfp 内存分配标志，决定内存分配时的策略。
+ * @param order 内存分配顺序，决定了分配的物理页面数量。
+ * @return 返回一个指向分配的folio结构体的指针，如果分配失败则返回NULL。
+ */
 struct folio *folio_alloc(gfp_t gfp, unsigned order)
 {
+    // 分配指定数量的物理页面
 	struct page *page = alloc_pages(gfp | __GFP_COMP, order);
 
+    // 如果页面分配成功并且order大于1，则准备将这些页面转换为transhuge页面
 	if (page && order > 1)
 		prep_transhuge_page(page);
+
+    // 返回folio结构体指针，实际上是page指针的类型转换
 	return (struct folio *)page;
 }
 EXPORT_SYMBOL(folio_alloc);

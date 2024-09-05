@@ -663,31 +663,98 @@ enum zone_watermarks {
  * it should not contribute to serious fragmentation causing THP allocation
  * failures.
  */
+// 根据配置宏CONFIG_TRANSPARENT_HUGEPAGE的值来决定是否支持透明大页面(THP)特性
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
-#define NR_PCP_THP 1
+#define NR_PCP_THP 1 // 定义支持THP特性时，THP列表的数量为1
 #else
-#define NR_PCP_THP 0
+#define NR_PCP_THP 0 // 定义不支持THP特性时，THP列表的数量为0
 #endif
+
+// 定义低阶PCP列表的数量，基于迁移PCP类型和页面分配代价顺序常量
 #define NR_LOWORDER_PCP_LISTS (MIGRATE_PCPTYPES * (PAGE_ALLOC_COSTLY_ORDER + 1))
+
+// 总PCP列表数量等于低阶PCP列表数量加上THP列表数量
 #define NR_PCP_LISTS (NR_LOWORDER_PCP_LISTS + NR_PCP_THP)
 
 #define min_wmark_pages(z) (z->_watermark[WMARK_MIN] + z->watermark_boost)
 #define low_wmark_pages(z) (z->_watermark[WMARK_LOW] + z->watermark_boost)
 #define high_wmark_pages(z) (z->_watermark[WMARK_HIGH] + z->watermark_boost)
+// mm: reclaim small amounts of memory when an external fragmentation event occurs
+
+// An external fragmentation event was previously described as
+
+// When the page allocator fragments memory, it records the event using
+// the mm_page_alloc_extfrag event. If the fallback_order is smaller
+// than a pageblock order (order-9 on 64-bit x86) then it's considered
+// an event that will cause external fragmentation issues in the future.
+
+// The kernel reduces the probability of such events by increasing the
+// watermark sizes by calling set_recommended_min_free_kbytes early in the
+// lifetime of the system. This works reasonably well in general but if
+// there are enough sparsely populated pageblocks then the problem can still
+// occur as enough memory is free overall and kswapd stays asleep.
+
+// This patch introduces a watermark_boost_factor sysctl that allows a zone
+// watermark to be temporarily boosted when an external fragmentation causing
+// events occurs. The boosting will stall allocations that would decrease
+// free memory below the boosted low watermark and kswapd is woken if the
+// calling context allows to reclaim an amount of memory relative to the size
+// of the high watermark and the watermark_boost_factor until the boost is
+// cleared. When kswapd finishes, it wakes kcompactd at the pageblock order
+// to clean some of the pageblocks that may have been affected by the
+// fragmentation event. kswapd avoids any writeback, slab shrinkage and swap
+// from reclaim context during this operation to avoid excessive system
+// disruption in the name of fragmentation avoidance. Care is taken so that
+// kswapd will do normal reclaim work if the system is really low on memory.
+
+// This was evaluated using the same workloads as "mm, page_alloc: Spread
+// allocations across zones before introducing fragmentation".
+// 如何通过内核机制来回收少量内存，避免碎片化问题进一步恶化。下面是这个补丁的一些关键点：
+
+// 背景：
+// 外部碎片化事件：当页面分配器（page allocator）导致内存碎片化时，会记录这个事件。如果分配的页面大小（fallback_order）小于pageblock的大小（在64位x86系统上是order-9），那么这被认为是一个可能在未来引起外部碎片化问题的事件。
+
+// 现有机制：内核通过增加内存水位线（watermark sizes）来减少这些事件的概率，这是通过在系统生命周期早期调用set_recommended_min_free_kbytes函数来实现的。然而，如果系统中的pageblocks分布稀疏，仍然可能发生外部碎片化问题，因为即使总体上有足够的内存，kswapd（负责后台回收内存的守护进程）也可能保持休眠状态。
+
+// 补丁内容：
+// 引入watermark_boost_factor：这是一个新的sysctl参数，当发生外部碎片化事件时，允许临时提高区域水位线。提高的水位线将阻止那些会导致空闲内存低于提高后低水位线的分配操作，同时会唤醒kswapd进程（如果调用上下文允许）来回收一定量的内存。回收的内存量取决于高水位线和watermark_boost_factor的大小，直到提升的水位线被清除。
+
+// kswapd与kcompactd的协调：当kswapd完成内存回收后，它会在pageblock级别唤醒kcompactd进程来清理可能受到碎片化事件影响的pageblocks。为了避免系统过度受影响，kswapd在这种操作中会避免进行写回操作、缓存回收和交换操作，但如果系统确实内存非常紧张，kswapd仍会执行正常的内存回收工作。
+
+// 评估：
+// 该补丁使用了与“mm, page_alloc: Spread allocations across zones before introducing fragmentation”相同的工作负载进行评估，表明它经过了一定的性能测试。
+
+// 总结：
+// 这个补丁的目的是在外部碎片化事件发生时，通过动态调整水位线和协调kswapd与kcompactd进程，减少碎片化问题的影响，同时尽量避免对系统性能的过度干扰。
 #define wmark_pages(z, i) (z->_watermark[i] + z->watermark_boost)
 
 /* Fields and list protected by pagesets local_lock in page_alloc.c */
+/**
+ * 结构体 per_cpu_pages 定义了每个CPU的页面管理数据结构。
+ * 它包含了用于同步和管理页面分配和释放的机制，以及用于跟踪页面状态的变量。
+ */
 struct per_cpu_pages {
-	spinlock_t lock;	/* Protects lists field */
-	int count;		/* number of pages in the list */
-	int high;		/* high watermark, emptying needed */
-	int batch;		/* chunk size for buddy add/remove */
-	short free_factor;	/* batch scaling factor during free */
+	/* lock 用于保护 lists 字段，确保在多CPU环境下安全访问列表 */
+	spinlock_t lock;
+
+	/* count 表示当前在列表中的页面数量 */
+	int count;
+
+	/* high 表示高水位线，当页面数量超过此值时需要进行释放操作 */
+	int high;
+
+	/* batch 指定了在 buddy 算法中添加或移除页面时的块大小 */
+	int batch;
+
+	/* free_factor 在释放页面时用于调整 batch 的比例因子 */
+	short free_factor;
+
+	/* 条件编译变量 expire，用于NUMA系统中远程页面集的管理 */
 #ifdef CONFIG_NUMA
-	short expire;		/* When 0, remote pagesets are drained */
+	short expire;
 #endif
 
-	/* Lists of pages, one per migrate type stored on the pcp-lists */
+	/* lists 是一组链表，每个迁移类型有一个链表，用于存储页面 */
 	struct list_head lists[NR_PCP_LISTS];
 } ____cacheline_aligned_in_smp;
 
@@ -808,48 +875,42 @@ enum zone_type {
 
 #define ASYNC_AND_SYNC 2
 
+// 定义内存区域的结构体
 struct zone {
-	/* Read-mostly fields */
+	// 只读字段
 
-	/* zone watermarks, access with *_wmark_pages(zone) macros */
+	// 区域水印，使用 *_wmark_pages(zone) 宏访问
 	unsigned long _watermark[NR_WMARK];
+	// 水印提升值
 	unsigned long watermark_boost;
 
+	// 预留的高原子内存页数
 	unsigned long nr_reserved_highatomic;
 
-	/*
-	 * We don't know if the memory that we're going to allocate will be
-	 * freeable or/and it will be released eventually, so to avoid totally
-	 * wasting several GB of ram we must reserve some of the lower zone
-	 * memory (otherwise we risk to run OOM on the lower zones despite
-	 * there being tons of freeable ram on the higher zones).  This array is
-	 * recalculated at runtime if the sysctl_lowmem_reserve_ratio sysctl
-	 * changes.
-	 */
+	// 为了防止在低端区域出现OOM，预留的一部分低端内存
 	long lowmem_reserve[MAX_NR_ZONES];
 
 #ifdef CONFIG_NUMA
+	// NUMA节点编号
 	int node;
 #endif
+	// 与该区域相关的页面列表数据
 	struct pglist_data	*zone_pgdat;
+	// 每个CPU的页面集
 	struct per_cpu_pages	__percpu *per_cpu_pageset;
+	// 每个CPU的区域统计信息
 	struct per_cpu_zonestat	__percpu *per_cpu_zonestats;
-	/*
-	 * the high and batch values are copied to individual pagesets for
-	 * faster access
-	 */
+
+	// 高水位线和批量值，为了快速访问而复制到各个页面集中
 	int pageset_high;
 	int pageset_batch;
 
 #ifndef CONFIG_SPARSEMEM
-	/*
-	 * Flags for a pageblock_nr_pages block. See pageblock-flags.h.
-	 * In SPARSEMEM, this map is stored in struct mem_section
-	 */
+	// 页面块标志，见 pageblock-flags.h，在SPARSEMEM中，该映射存储在struct mem_section中
 	unsigned long		*pageblock_flags;
 #endif /* CONFIG_SPARSEMEM */
 
-	/* zone_start_pfn == zone_start_paddr >> PAGE_SHIFT */
+	// 区域起始物理页号
 	unsigned long		zone_start_pfn;
 
 	/*
@@ -894,76 +955,79 @@ struct zone {
 	 * mem_hotplug_begin/done(). Any reader who can't tolerant drift of
 	 * present_pages should use get_online_mems() to get a stable value.
 	 */
+	// 原子计数器，用于跟踪管理的页面数量
 	atomic_long_t		managed_pages;
+
+	// 跨越的页面数量，表示区域中分配的所有物理页面的总数
 	unsigned long		spanned_pages;
+
+	// 当前实际存在的页面数量，表示当前实际可用的物理页面总数
 	unsigned long		present_pages;
+
 #if defined(CONFIG_MEMORY_HOTPLUG)
+	// 早期实际存在的页面数量，用于支持热插拔功能
 	unsigned long		present_early_pages;
 #endif
+
 #ifdef CONFIG_CMA
+	// CMA（连续内存区域）页面数量，用于需要连续内存的设备
 	unsigned long		cma_pages;
 #endif
 
+	// 区域名称，用于标识不同的内存区域
 	const char		*name;
 
 #ifdef CONFIG_MEMORY_ISOLATION
-	/*
-	 * Number of isolated pageblock. It is used to solve incorrect
-	 * freepage counting problem due to racy retrieving migratetype
-	 * of pageblock. Protected by zone->lock.
-	 */
+	// 隔离的页面块数量，用于解决由于竞争条件导致的页面计数不正确问题
 	unsigned long		nr_isolate_pageblock;
 #endif
 
 #ifdef CONFIG_MEMORY_HOTPLUG
-	/* see spanned/present_pages for more description */
+	// span_seqlock 用于在热插拔操作期间同步spanned_pages和present_pages的更新
 	seqlock_t		span_seqlock;
 #endif
 
+	// 初始化标志，表示该区域是否已经完成初始化
 	int initialized;
 
-	/* Write-intensive fields used from the page allocator */
+	// 用于页面分配器的写密集型字段，以减少缓存未命中
 	CACHELINE_PADDING(_pad1_);
 
-	/* free areas of different sizes */
+	// 不同大小的空闲区域
 	struct free_area	free_area[MAX_ORDER + 1];
 
-#ifdef CONFIG_UNACCEPTED_MEMORY
-	/* Pages to be accepted. All pages on the list are MAX_ORDER */
+	#ifdef CONFIG_UNACCEPTED_MEMORY
+	// 未被接受的页面列表，所有在此列表上的页面都是MAX_ORDER大小
 	struct list_head	unaccepted_pages;
-#endif
+	#endif
 
-	/* zone flags, see below */
+	// 区域标志，用于标识各种状态
 	unsigned long		flags;
 
-	/* Primarily protects free_area */
+	// 主要用于保护free_area结构体
 	spinlock_t		lock;
 
-	/* Write-intensive fields used by compaction and vmstats. */
+	// 由紧凑和vmstats使用，减少缓存未命中
 	CACHELINE_PADDING(_pad2_);
 
-	/*
-	 * When free pages are below this point, additional steps are taken
-	 * when reading the number of free pages to avoid per-cpu counter
-	 * drift allowing watermarks to be breached
-	 */
+	// 当空闲页面低于此标记时，读取空闲页面数量时会采取额外步骤
 	unsigned long percpu_drift_mark;
 
 #if defined CONFIG_COMPACTION || defined CONFIG_CMA
-	/* pfn where compaction free scanner should start */
+	// 紧凑型免费扫描器应开始的物理页号
 	unsigned long		compact_cached_free_pfn;
-	/* pfn where compaction migration scanner should start */
+	// 紧凑型迁移扫描器应开始的物理页号
 	unsigned long		compact_cached_migrate_pfn[ASYNC_AND_SYNC];
+	// 紧凑型初始化迁移扫描起始页号
 	unsigned long		compact_init_migrate_pfn;
+	// 紧凑型初始化免费扫描起始页号
 	unsigned long		compact_init_free_pfn;
 #endif
-
 #ifdef CONFIG_COMPACTION
 	/*
-	 * On compaction failure, 1<<compact_defer_shift compactions
-	 * are skipped before trying again. The number attempted since
-	 * last failure is tracked with compact_considered.
-	 * compact_order_failed is the minimum compaction failed order.
+	 * 当内存整理失败时，会跳过接下来的1<<compact_defer_shift次内存整理尝试，
+	 * 直到下一次再尝试。通过compact_considered来追踪自上次失败以来尝试过的次数。
+	 * compact_order_failed记录的是失败的最小内存整理顺序。
 	 */
 	unsigned int		compact_considered;
 	unsigned int		compact_defer_shift;
@@ -971,14 +1035,17 @@ struct zone {
 #endif
 
 #if defined CONFIG_COMPACTION || defined CONFIG_CMA
-	/* Set to true when the PG_migrate_skip bits should be cleared */
+	/* 当需要清除PG_migrate_skip位时，设置为true */
 	bool			compact_blockskip_flush;
 #endif
 
+	/* 如果内存区域是连续的，设置为true */
 	bool			contiguous;
 
+	/* 用于缓存行对齐的填充 */
 	CACHELINE_PADDING(_pad3_);
-	/* Zone statistics */
+
+	/* 区域统计信息 */
 	atomic_long_t		vm_stat[NR_VM_ZONE_STAT_ITEMS];
 	atomic_long_t		vm_numa_event[NR_VM_NUMA_EVENT_ITEMS];
 } ____cacheline_internodealigned_in_smp;

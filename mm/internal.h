@@ -222,23 +222,41 @@ void page_alloc_sysctl_init(void);
  * in __alloc_pages_slowpath(). All other functions pass the whole structure
  * by a const pointer.
  */
+// alloc_context 结构体用于表示内核中内存分配操作的上下文。
+// 它包含了关于分配的 zone 列表、允许的节点、首选的 zone 引用以及迁移类型等信息。
+// 该结构帮助内核做出更明智的内存分配决策。
+
 struct alloc_context {
+	// zonelist 指向可用于分配的一系列 zone 的列表。
 	struct zonelist *zonelist;
+
+	// nodemask 用于指定本次分配操作允许使用的节点。
 	nodemask_t *nodemask;
+
+	// preferred_zoneref 指向首选的 zone 引用以供分配使用。
+	// 通常这个 zone 是分配操作的首选目标。
+	// 一般的关系是这样的.假设只有zone_dma32 和zone_NORMAL
+	//                           --zone
+	//             ---zonref[1]--
+	// 			              --zone_idx =0  -     -  ZONE_NORAML = 1
+	// zonelist --                             -  -
+	//                           --zone          -
+	//             ---zonref[0]--              -  -
+	// 			              --zone_idx =1  -     -  ZONE_DMA32 =0
+
+	// zone_normal排名靠前,所以优先它.
+
 	struct zoneref *preferred_zoneref;
 	int migratetype;
-
 	/*
-	 * highest_zoneidx represents highest usable zone index of
-	 * the allocation request. Due to the nature of the zone,
-	 * memory on lower zone than the highest_zoneidx will be
-	 * protected by lowmem_reserve[highest_zoneidx].
+	 * highest_zoneidx 表示分配请求可以使用的最高 zone 索引。
+	 * 由于 zone 的特性，低于 highest_zoneidx 的 zone 中的内存将受到 lowmem_reserve[highest_zoneidx] 的保护。
 	 *
-	 * highest_zoneidx is also used by reclaim/compaction to limit
-	 * the target zone since higher zone than this index cannot be
-	 * usable for this allocation request.
+	 * highest_zoneidx 也被回收/压缩过程用来限制目标 zone，因为高于此索引的 zone 对于本次分配请求是不可用的。
 	 */
 	enum zone_type highest_zoneidx;
+
+	// spread_dirty_pages 标记是否应该在分配过程中分散脏页。
 	bool spread_dirty_pages;
 };
 
@@ -803,6 +821,12 @@ unsigned int reclaim_clean_pages_from_list(struct zone *zone,
  * cannot assume a reduced access to memory reserves is sufficient for
  * !MMU
  */
+
+/*
+ * 仅 MMU 架构有异步内存不足（OOM）受害者回收机制 - 即 oom_reaper，
+ * 因此我们不能假设对内存储备的受限访问对非 MMU 架构来说就足够了。
+ */
+
 #ifdef CONFIG_MMU
 #define ALLOC_OOM		0x08
 #else

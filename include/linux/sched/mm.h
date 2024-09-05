@@ -298,11 +298,23 @@ static inline void memalloc_retry_wait(gfp_t gfp_flags)
  * that might allocate, but often don't. Compiles to nothing without
  * CONFIG_LOCKDEP. Includes a conditional might_sleep() if @gfp allows blocking.
  */
+/**
+ * @brief 准备进行可能的内存分配操作
+ *
+ * 该函数用于在内存分配前执行必要的准备操作，包括获取和释放内存 reclaim 锁，
+ * 以及检查是否可以阻塞当前进程。此函数不直接进行内存分配，而是为内存分配做好前期准备。
+ *
+ * @param gfp_mask 内存页面分配器使用的 GFP (Green Folio Page) 标记，决定了分配内存时的策略和上下文行为。
+ */
 static inline void might_alloc(gfp_t gfp_mask)
 {
+    // 获取内存 reclaim 锁，该锁用于协调内存回收操作。
 	fs_reclaim_acquire(gfp_mask);
+    // 释放内存 reclaim 锁。
 	fs_reclaim_release(gfp_mask);
 
+    // 如果分配标志允许阻塞，则准备让当前进程睡眠。
+    // 这是因为某些内存分配操作可能需要阻塞当前进程，例如等待更多的内存变得可用。
 	might_sleep_if(gfpflags_allow_blocking(gfp_mask));
 }
 
