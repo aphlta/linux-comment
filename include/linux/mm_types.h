@@ -494,15 +494,20 @@ struct vm_area_struct {
 		struct {
 			/* VMA covers [vm_start; vm_end) addresses within mm */
 			unsigned long vm_start;
+			// VMA的起始地址
 			unsigned long vm_end;
+			// VMA的结束地址
 		};
 #ifdef CONFIG_PER_VMA_LOCK
 		struct rcu_head vm_rcu;	/* Used for deferred freeing. */
+		// 用于延迟释放
 #endif
 	};
 
 	struct mm_struct *vm_mm;	/* The address space we belong to. */
+	// 所属的地址空间
 	pgprot_t vm_page_prot;          /* Access permissions of this VMA. */
+	// 访问权限
 
 	/*
 	 * Flags, see mm.h.
@@ -529,10 +534,13 @@ struct vm_area_struct {
 	 * slowpath.
 	 */
 	int vm_lock_seq;
+	// 序列计数器，用于并发控制
 	struct vma_lock *vm_lock;
+	// VMA锁
 
 	/* Flag to indicate areas detached from the mm->mm_mt tree */
 	bool detached;
+	// 标记是否已从mm->mm_mt树分离
 #endif
 
 	/*
@@ -542,7 +550,9 @@ struct vm_area_struct {
 	 */
 	struct {
 		struct rb_node rb;
+		// 红黑树节点
 		unsigned long rb_subtree_last;
+		// 子树最后一个节点
 	} shared;
 
 	/*
@@ -553,16 +563,23 @@ struct vm_area_struct {
 	 */
 	struct list_head anon_vma_chain; /* Serialized by mmap_lock &
 					  * page_table_lock */
+	// 匿名VMA链表
 	struct anon_vma *anon_vma;	/* Serialized by page_table_lock */
+	// 匿名VMA指针
 
 	/* Function pointers to deal with this struct. */
 	const struct vm_operations_struct *vm_ops;
+	// VM操作函数指针
 
 	/* Information about our backing store: */
 	unsigned long vm_pgoff;		/* Offset (within vm_file) in PAGE_SIZE
 					   units */
+
+	// 文件偏移量（以PAGE_SIZE为单位）
 	struct file * vm_file;		/* File we map to (can be NULL). */
+	// 映射的文件（可为NULL）
 	void * vm_private_data;		/* was vm_pte (shared mem) */
+	// 私有数据指针
 
 #ifdef CONFIG_ANON_VMA_NAME
 	/*
@@ -571,20 +588,26 @@ struct vm_area_struct {
 	 * unnamed. Serialized by mmap_lock. Use anon_vma_name to access.
 	 */
 	struct anon_vma_name *anon_name;
+	// 匿名VMA名称
 #endif
 #ifdef CONFIG_SWAP
 	atomic_long_t swap_readahead_info;
+	// 交换区预读信息
 #endif
 #ifndef CONFIG_MMU
 	struct vm_region *vm_region;	/* NOMMU mapping region */
+	// NOMMU映射区域
 #endif
 #ifdef CONFIG_NUMA
 	struct mempolicy *vm_policy;	/* NUMA policy for the VMA */
+	// NUMA策略
 #endif
 #ifdef CONFIG_NUMA_BALANCING
 	struct vma_numab_state *numab_state;	/* NUMA Balancing state */
+	// NUMA平衡状态
 #endif
 	struct vm_userfaultfd_ctx vm_userfaultfd_ctx;
+	// 用户空间故障注入上下文
 } __randomize_layout;
 
 #ifdef CONFIG_SCHED_MM_CID
