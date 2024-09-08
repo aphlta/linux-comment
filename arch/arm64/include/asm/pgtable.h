@@ -21,7 +21,10 @@
  * VMALLOC_END: extends to the available space below vmemmap, PCI I/O space
  *	and fixed mappings
  */
+// 定义VMALLOC区域的起始地址，确保模块区域之后是VMALLOC区域
 #define VMALLOC_START		(MODULES_END)
+
+// 定义VMALLOC区域的结束地址，确保其与VMEMMAP区域开始地址之间有256M的间隔
 #define VMALLOC_END		(VMEMMAP_START - SZ_256M)
 
 #define vmemmap			((struct page *)VMEMMAP_START - (memstart_addr >> PAGE_SHIFT))

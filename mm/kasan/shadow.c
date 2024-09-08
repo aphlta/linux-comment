@@ -311,25 +311,53 @@ void __init __weak kasan_populate_early_vm_area_shadow(void *start,
 {
 }
 
+/**
+ * 在vmalloc区域的页表中填充KASAN_VMALLOC_INVALID值。
+ *
+ * 本函数尝试在vmalloc区域的页表中填充一个特定值，以帮助
+ * Kernel ASAN检测野指针访问。当页表项还未被填充时，它会：
+ * 1. 分配一个新的物理页。
+ * 2. 在该物理页上填充KASAN_VMALLOC_INVALID值。
+ * 3. 更新页表项指向这个新分配的物理页。
+ *
+ * 如果在填充过程中页表项已被其他地方填充，这意味着并发访问
+ * 或race条件，函数将不会进行填充并释放已分配的物理页。
+ *
+ * @param ptep 页表项的指针。
+ * @param addr 当前地址，用于计算页表项。
+ * @param unused 未使用的参数，为了保持接口兼容性。
+ *
+ * @return 0表示成功，-ENOMEM表示内存分配失败。
+ */
 static int kasan_populate_vmalloc_pte(pte_t *ptep, unsigned long addr,
 				      void *unused)
 {
+    // 页的物理地址
 	unsigned long page;
+    // 页表项结构
 	pte_t pte;
 
+    // 如果页表项已有值，说明已填充，直接返回
 	if (likely(!pte_none(ptep_get(ptep))))
 		return 0;
 
+    // 分配一个新的物理页
 	page = __get_free_page(GFP_KERNEL);
 	if (!page)
 		return -ENOMEM;
 
+    // 在物理页上填充KASAN_VMALLOC_INVALID值
 	memset((void *)page, KASAN_VMALLOC_INVALID, PAGE_SIZE);
+    // 创建一个指向物理页的页表项
 	pte = pfn_pte(PFN_DOWN(__pa(page)), PAGE_KERNEL);
 
+    // 加锁以防止并发访问
 	spin_lock(&init_mm.page_table_lock);
+    // 再次检查页表项，确保在这段时间内未被其他地方填充
 	if (likely(pte_none(ptep_get(ptep)))) {
+        // 填充页表项
 		set_pte_at(&init_mm, addr, ptep, pte);
+        // 标记页为已分配，以避免释放已分配的页
 		page = 0;
 	}
 	spin_unlock(&init_mm.page_table_lock);

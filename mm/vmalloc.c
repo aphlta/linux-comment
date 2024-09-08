@@ -275,32 +275,58 @@ static int vmap_p4d_range(pgd_t *pgd, unsigned long addr, unsigned long end,
 	return 0;
 }
 
+/**
+ * 在虚拟内存映射区域中添加新的映射，而不触发flush操作。
+ *
+ * @param addr 映射的起始虚拟地址。
+ * @param end 映射的结束虚拟地址。
+ * @param phys_addr 映射的起始物理地址。
+ * @param prot 页面保护类型。
+ * @param max_page_shift 最大的页面转换缓冲区(PTE)聚合程度。
+ *
+ * @return 操作结果，0表示成功，非0表示失败。
+ */
 static int vmap_range_noflush(unsigned long addr, unsigned long end,
 			phys_addr_t phys_addr, pgprot_t prot,
 			unsigned int max_page_shift)
 {
+	// 获取页全局目录表指针
 	pgd_t *pgd;
+	// 记录起始地址
 	unsigned long start;
+	// 下一个地址
 	unsigned long next;
+	// 错误码
 	int err;
+	// 页表修改掩码
 	pgtbl_mod_mask mask = 0;
 
+	// 可能会睡眠，表明函数内部可能会进行需要睡眠的操作
 	might_sleep();
+	// 确保起始地址小于结束地址
 	BUG_ON(addr >= end);
 
+	// 初始化起始地址
 	start = addr;
+	// 获取起始地址对应的页全局目录表项
 	pgd = pgd_offset_k(addr);
+	// 遍历地址范围，进行映射
 	do {
+		// 计算下一个地址
 		next = pgd_addr_end(addr, end);
+		// 在当前pgd表中添加映射
 		err = vmap_p4d_range(pgd, addr, next, phys_addr, prot,
 					max_page_shift, &mask);
+		// 操作失败则退出循环
 		if (err)
 			break;
 	} while (pgd++, phys_addr += (next - addr), addr = next, addr != end);
 
+	// 如果页表修改掩码指示需要同步，则进行同步操作
 	if (mask & ARCH_PAGE_TABLE_SYNC_MASK)
 		arch_sync_kernel_mappings(start, end);
 
+	// 返回操作结果
 	return err;
 }
 
@@ -576,40 +602,84 @@ static int vmap_small_pages_range_noflush(unsigned long addr, unsigned long end,
  *
  * This is an internal function only. Do not use outside mm/.
  */
+/**
+ * __vmap_pages_range_noflush - 在指定地址范围内映射虚拟页面，不执行刷新操作
+ * @addr: 映射起始地址
+ * @end: 映射结束地址（不包含该地址本身）
+ * @prot: 页表项保护类型
+ * @pages: 指向实际物理页面的数组指针
+ * @page_shift: 页面大小的移位值，决定了页面的大小
+ *
+ * 该函数根据指定的地址范围、保护类型、物理页面数组和页面移位值，
+ * 在虚拟内存中映射相应的页面。与标准的映射函数不同，此函数不执行
+ * 映射后的数据刷新操作，适用于不需要立即可见的数据区域。
+ *
+ * 返回值：
+ *   - 成功映射时返回0
+ *   - 映射失败时返回错误码
+ */
 int __vmap_pages_range_noflush(unsigned long addr, unsigned long end,
 		pgprot_t prot, struct page **pages, unsigned int page_shift)
 {
+	/* 计算需要映射的页面数量 */
 	unsigned int i, nr = (end - addr) >> PAGE_SHIFT;
 
+	/* 确保请求的页面移位值不小于默认页面大小的移位值 */
 	WARN_ON(page_shift < PAGE_SHIFT);
 
+	/* 如果系统不支持大页面映射，或者请求的页面大小与默认页面大小相同，则调用小页面映射函数 */
 	if (!IS_ENABLED(CONFIG_HAVE_ARCH_HUGE_VMALLOC) ||
 			page_shift == PAGE_SHIFT)
 		return vmap_small_pages_range_noflush(addr, end, prot, pages);
 
+	/* 按照指定的页面大小逐个映射页面 */
 	for (i = 0; i < nr; i += 1U << (page_shift - PAGE_SHIFT)) {
 		int err;
 
+		/* 映射当前页面，并应用保护类型和页面大小 */
 		err = vmap_range_noflush(addr, addr + (1UL << page_shift),
 					page_to_phys(pages[i]), prot,
 					page_shift);
+		/* 如果映射失败，返回错误码 */
 		if (err)
 			return err;
 
+		/* 更新下一页的起始地址 */
 		addr += 1UL << page_shift;
 	}
 
+	/* 所有页面映射成功 */
 	return 0;
 }
 
+/**
+ * vmap_pages_range_noflush: 虚拟映射一组页面，并设置保护类型。
+ *
+ * @addr: 起始虚拟地址
+ * @end: 结束虚拟地址（不包含此地址）
+ * @prot: 页面保护类型
+ * @pages: 页面数组的指针
+ * @page_shift: 页面大小的对数
+ *
+ * 本函数首先调用kmsan_vmap_pages_range_noflush尝试进行虚拟映射，
+ * 如果返回错误，则直接返回错误码。如果成功，则调用__vmap_pages_range_noflush
+ * 进行实际的虚拟映射操作。
+ *
+ * 返回值:
+ *   成功时返回0，失败时返回负错误码。
+ */
 int vmap_pages_range_noflush(unsigned long addr, unsigned long end,
 		pgprot_t prot, struct page **pages, unsigned int page_shift)
 {
+	// 尝试进行虚拟映射
 	int ret = kmsan_vmap_pages_range_noflush(addr, end, prot, pages,
 						 page_shift);
 
+	// 如果有错误返回，则直接返回错误码
 	if (ret)
 		return ret;
+
+	// 调用实际的虚拟映射操作
 	return __vmap_pages_range_noflush(addr, end, prot, pages, page_shift);
 }
 
@@ -625,12 +695,28 @@ int vmap_pages_range_noflush(unsigned long addr, unsigned long end,
  * RETURNS:
  * 0 on success, -errno on failure.
  */
+/**
+ * vmap_pages_range - 连续地将一组页面映射到虚拟地址空间
+ * @addr: 映射的起始虚拟地址
+ * @end: 映射的结束虚拟地址（不包括此地址）
+ * @prot: 页面保护类型
+ * @pages: 将要映射的页面数组指针
+ * @page_shift: 页面大小的2的幂次方
+ *
+ * 本函数将一系列页面连续地映射到虚拟地址空间中，首先使用
+ * vmap_pages_range_noflush进行页面映射，然后调用flush_cache_vmap
+ * 刷新映射区域的缓存，确保修改能够立即反映到硬件。
+ *
+ * 返回: 映射操作的错误代码，0表示成功。
+ */
 static int vmap_pages_range(unsigned long addr, unsigned long end,
 		pgprot_t prot, struct page **pages, unsigned int page_shift)
 {
 	int err;
 
+	// 执行页面映射操作，但不刷新缓存
 	err = vmap_pages_range_noflush(addr, end, prot, pages, page_shift);
+	// 映射完成后，刷新缓存以确保修改生效
 	flush_cache_vmap(addr, end);
 	return err;
 }
@@ -879,6 +965,8 @@ find_va_links(struct vmap_area *va,
 	 * we end up with parent rb_node and correct direction, i name
 	 * it link, where the new va->rb_node will be attached to.
 	 */
+
+	// 遍历红黑树以找到适合插入新节点的位置
 	do {
 		tmp_va = rb_entry(*link, struct vmap_area, rb_node);
 
@@ -887,6 +975,8 @@ find_va_links(struct vmap_area *va,
 		 * Trigger the BUG() if there are sides(left/right)
 		 * or full overlaps.
 		 */
+
+		// 检查当前节点与待插入节点的地址范围是否重叠
 		if (va->va_end <= tmp_va->va_start)
 			link = &(*link)->rb_left;
 		else if (va->va_start >= tmp_va->va_end)
@@ -899,6 +989,7 @@ find_va_links(struct vmap_area *va,
 		}
 	} while (*link);
 
+	// 更新父节点指针，并返回最终的插入位置
 	*parent = &tmp_va->rb_node;
 	return link;
 }
@@ -1074,15 +1165,29 @@ augment_tree_propagate_from(struct vmap_area *va)
 #endif
 }
 
+/**
+ * 向虚拟内存映射区域树中插入一个新的区域
+ *
+ * 本函数尝试将一个新的虚拟内存映射区域（vmap_area）插入到红黑树（rb_root）中
+ * 它首先通过调用find_va_links函数找到合适的插入位置，然后通过link_va函数进行插入
+ *
+ * @param va 待插入的虚拟内存映射区域结构体指针
+ * @param root 指向红黑树根节点的指针
+ * @param head 列表头的指针，用于插入vmap_area
+ */
 static void
 insert_vmap_area(struct vmap_area *va,
 	struct rb_root *root, struct list_head *head)
 {
+	// 用于遍历红黑树的指针
 	struct rb_node **link;
+	// 用于存储父节点的指针
 	struct rb_node *parent;
 
+	// 寻找插入位置的链接点和父节点
 	link = find_va_links(va, root, NULL, &parent);
 	if (link)
+		// 插入新的虚拟内存映射区域
 		link_va(va, root, parent, link, head);
 }
 
@@ -1244,30 +1349,48 @@ is_within_this_va(struct vmap_area *va, unsigned long size,
  * a search length is adjusted to account for worst case alignment
  * overhead.
  */
+/**
+ * 在红黑树中查找最合适的 vmap_area 区域
+ * 该函数通过红黑树搜索合适的内存区域，用于虚拟内存映射
+ *
+ * @param root 红黑树的根节点指针
+ * @param size 请求的内存区域大小
+ * @param align 内存区域的对齐要求
+ * @param vstart 虚拟内存区域的起始地址
+ * @param adjust_search_size 是否为对齐调整搜索大小
+ *
+ * @return 匹配的 vmap_area 结构指针，如果没有找到则返回 NULL
+ */
 static __always_inline struct vmap_area *
 find_vmap_lowest_match(struct rb_root *root, unsigned long size,
 	unsigned long align, unsigned long vstart, bool adjust_search_size)
 {
-	struct vmap_area *va;
-	struct rb_node *node;
-	unsigned long length;
+	struct vmap_area *va; // 虚拟内存区域结构体指针
+	struct rb_node *node; // 红黑树节点指针
+	unsigned long length; // 调整后的搜索长度
 
-	/* Start from the root. */
+	// 从根节点开始
 	node = root->rb_node;
 
-	/* Adjust the search size for alignment overhead. */
+	// 根据对齐开销调整搜索大小
 	length = adjust_search_size ? size + align - 1 : size;
 
+	// 遍历红黑树节点
 	while (node) {
+		// 获取当前节点关联的虚拟内存区域
 		va = rb_entry(node, struct vmap_area, rb_node);
 
+		// 根据搜索条件决定向左子树还是右子树搜索
 		if (get_subtree_max_size(node->rb_left) >= length &&
 				vstart < va->va_start) {
+			// 如果左子树可能有足够大的区域且 vstart 小于当前区域的起始地址，则向左搜索
 			node = node->rb_left;
 		} else {
+			// 检查当前节点区域是否满足条件
 			if (is_within_this_va(va, size, align, vstart))
 				return va;
 
+			// 如果右子树可能有足够大的区域，则向右搜索
 			/*
 			 * Does not make sense to go deeper towards the right
 			 * sub-tree if it does not have a free block that is
@@ -1278,6 +1401,7 @@ find_vmap_lowest_match(struct rb_root *root, unsigned long size,
 				continue;
 			}
 
+			// 回溯寻找满足条件的右子树
 			/*
 			 * OK. We roll back and find the first right sub-tree,
 			 * that will satisfy the search criteria. It can happen
@@ -1291,6 +1415,7 @@ find_vmap_lowest_match(struct rb_root *root, unsigned long size,
 
 				if (get_subtree_max_size(node->rb_right) >= length &&
 						vstart <= va->va_start) {
+					// 更新 vstart 并搜索右子树
 					/*
 					 * Shift the vstart forward. Please note, we update it with
 					 * parent's start address adding "1" because we do not want
@@ -1305,6 +1430,7 @@ find_vmap_lowest_match(struct rb_root *root, unsigned long size,
 		}
 	}
 
+	// 没有找到匹配的区域
 	return NULL;
 }
 
@@ -1381,14 +1507,42 @@ classify_va_fit_type(struct vmap_area *va,
 	return type;
 }
 
+/**
+ * 调整虚拟地址区间以适应不同类型的内存分配请求
+ *
+ * 本函数根据新的内存分配请求，调整已存在的虚拟地址区间（VA）。目标是确保新的分配请求
+ * 能够在虚拟地址空间中得到满足，同时尽可能高效地利用现有资源。函数通过分类不同的
+ * 分配场景（完全匹配、左侧匹配、右侧匹配、无边缘匹配），执行相应的VA调整策略。
+ *
+ * @param root       RB树的根节点，用于维护虚拟地址区间的管理结构
+ * @param head       链表头指针，用于管理空闲的虚拟地址区间
+ * @param va         指向当前虚拟地址区间的结构体，需要根据新的分配请求进行调整
+ * @param nva_start_addr    新的虚拟地址区间开始地址
+ * @param size       新的分配请求的大小
+ *
+ * @return 返回0表示调整成功，非0表示调整失败
+ */
 static __always_inline int
 adjust_va_to_fit_type(struct rb_root *root, struct list_head *head,
 		      struct vmap_area *va, unsigned long nva_start_addr,
 		      unsigned long size)
 {
+	/* 用于存储拆分后可能产生的新的虚拟地址区间 */
 	struct vmap_area *lva = NULL;
+	/* 确定当前分配请求的类型 */
 	enum fit_type type = classify_va_fit_type(va, nva_start_addr, size);
 
+	// 68ad4a3 的作用
+	// 红黑树的使用： 以前的实现中，空闲的内存块管理是通过遍历列表实现的，复杂度为 O(n)。现在，通过引入增强型红黑树，空闲块按照地址顺序存储，并且每个节点都包含其子树中的最大可用块信息，这样可以更高效地找到合适的空闲块，复杂度降为 O(log n)。
+
+	// 新增结构体字段： vmap_area 结构体中增加了 subtree_max_size 字段，用于存储子树中的最大空闲块大小。这使得在内存分配和释放时，可以快速找到合适的空闲区域，并减少碎片化。
+
+	// 内存分配流程优化： 新的内存分配过程通过红黑树从根节点开始搜索，找到第一个适合的空闲块，然后根据实际需求进行分割。这与旧方法相比，更加高效。
+
+	// 内存释放和合并： 在释放内存时，系统会尝试将释放的块与相邻的空闲块合并。如果无法合并，则将新的空闲块插入到红黑树中，同时更新相关节点的信息。
+
+	// 锁机制的改进： 通过将全局锁拆分为两个独立的锁，一个用于分配，另一个用于释放，减少了锁竞争，进一步提升了并发性能。
+	/* 完全匹配：无需拆分VA，直接移除并释放 */
 	if (type == FL_FIT_TYPE) {
 		/*
 		 * No need to split VA, it fully fits.
@@ -1468,9 +1622,11 @@ adjust_va_to_fit_type(struct rb_root *root, struct list_head *head,
 		 */
 		va->va_start = nva_start_addr + size;
 	} else {
+		/* 如果不是已知的匹配类型，返回错误 */
 		return -1;
 	}
 
+	/* 对不是完全匹配的情况，更新树结构和链表 */
 	if (type != FL_FIT_TYPE) {
 		augment_tree_propagate_from(va);
 
@@ -1485,17 +1641,32 @@ adjust_va_to_fit_type(struct rb_root *root, struct list_head *head,
  * Returns a start address of the newly allocated area, if success.
  * Otherwise a vend is returned that indicates failure.
  */
+/**
+ * 内联函数，用于在指定的红黑树根节点中分配一个连续的虚拟内存区域。
+ *
+ * @param root 红黑树的根节点指针，用于查找空闲的虚拟内存区域。
+ * @param head 列表头指针，用于更新分配后的自由内存区域链表。
+ * @param size 请求分配的虚拟内存区域大小（以字节为单位）。
+ * @param align 对分配的虚拟内存区域起始地址的对齐要求（以字节为单位）。
+ * @param vstart 分配的虚拟内存区域的起始地址。
+ * @param vend 分配的虚拟内存区域的结束地址。
+ *
+ * @return 如果成功分配，返回分配的虚拟内存区域的起始地址；
+ *         如果不能满足分配请求，返回 vend。
+ */
 static __always_inline unsigned long
 __alloc_vmap_area(struct rb_root *root, struct list_head *head,
 	unsigned long size, unsigned long align,
 	unsigned long vstart, unsigned long vend)
 {
+	// 标志位，用于决定是否调整搜索大小
 	bool adjust_search_size = true;
 	unsigned long nva_start_addr;
 	struct vmap_area *va;
 	int ret;
 
-	/*
+	// 当对齐要求小于等于一页大小，或者请求的大小正好等于[vstart:vend]区间时，不进行调整
+		/*
 	 * Do not adjust when:
 	 *   a) align <= PAGE_SIZE, because it does not make any sense.
 	 *      All blocks(their start addresses) are at least PAGE_SIZE
@@ -1507,28 +1678,32 @@ __alloc_vmap_area(struct rb_root *root, struct list_head *head,
 	if (align <= PAGE_SIZE || (align > PAGE_SIZE && (vend - vstart) == size))
 		adjust_search_size = false;
 
+	// 查找最适合分配的虚拟内存区域
 	va = find_vmap_lowest_match(root, size, align, vstart, adjust_search_size);
 	if (unlikely(!va))
 		return vend;
 
+	// 根据对齐要求和已分配区域的起始地址，计算新的虚拟地址起始点
 	if (va->va_start > vstart)
 		nva_start_addr = ALIGN(va->va_start, align);
 	else
 		nva_start_addr = ALIGN(vstart, align);
 
-	/* Check the "vend" restriction. */
+	// 检查“vend”限制，确保分配的区域不超出这个限制
 	if (nva_start_addr + size > vend)
 		return vend;
 
-	/* Update the free vmap_area. */
+	// 调整自由va链表，使其适应分配请求
 	ret = adjust_va_to_fit_type(root, head, va, nva_start_addr, size);
 	if (WARN_ON_ONCE(ret))
 		return vend;
 
+	// 调试代码：检查分配结果是否符合预期
 #if DEBUG_AUGMENT_LOWEST_MATCH_CHECK
 	find_vmap_lowest_match_check(root, head, size, align);
 #endif
 
+	// 返回分配的虚拟内存区域的起始地址
 	return nva_start_addr;
 }
 
@@ -1579,6 +1754,22 @@ preload_this_cpu_lock(spinlock_t *lock, gfp_t gfp_mask, int node)
  * Allocate a region of KVA of the specified size and alignment, within the
  * vstart and vend.
  */
+/**
+ * 分配一个虚拟内存区域。
+ *
+ * 该函数用于分配一个连续的虚拟内存区域，主要用于内核内部使用。
+ * 它会检查参数的有效性，尝试分配内存，并在成功分配后注册该虚拟内存区域。
+ *
+ * @param size 要分配的虚拟内存区域的大小。
+ * @param align 虚拟内存区域的对齐要求。
+ * @param vstart 虚拟内存区域的建议起始地址。
+ * @param vend 虚拟内存区域的建议结束地址。
+ * @param node 分配内存的节点编号，用于NUMA系统。
+ * @param gfp_mask 分配内存时使用的标志。
+ * @param va_flags 虚拟内存区域的标志。
+ *
+ * @return 分配成功的虚拟内存区域结构指针，或在错误时返回ERR_PTR。
+ */
 static struct vmap_area *alloc_vmap_area(unsigned long size,
 				unsigned long align,
 				unsigned long vstart, unsigned long vend,
@@ -1591,59 +1782,143 @@ static struct vmap_area *alloc_vmap_area(unsigned long size,
 	int purged = 0;
 	int ret;
 
+	// 检查输入参数的有效性
 	if (unlikely(!size || offset_in_page(size) || !is_power_of_2(align)))
 		return ERR_PTR(-EINVAL);
 
+	// 检查vmap是否已初始化
 	if (unlikely(!vmap_initialized))
 		return ERR_PTR(-EBUSY);
 
+	// 可能会睡眠
 	might_sleep();
+	// 确保gfp_mask仅包含有效的内存回收标志
 	gfp_mask = gfp_mask & GFP_RECLAIM_MASK;
 
+	// 从缓存中分配一个vmap_area结构
 	va = kmem_cache_alloc_node(vmap_area_cachep, gfp_mask, node);
 	if (unlikely(!va))
 		return ERR_PTR(-ENOMEM);
 
-	/*
-	 * Only scan the relevant parts containing pointers to other objects
-	 * to avoid false negatives.
-	 */
+	// 扫描va结构以避免泄露
 	kmemleak_scan_area(&va->rb_node, SIZE_MAX, gfp_mask);
 
 retry:
+	// 尝试锁定并分配虚拟内存区域
 	preload_this_cpu_lock(&free_vmap_area_lock, gfp_mask, node);
 	addr = __alloc_vmap_area(&free_vmap_area_root, &free_vmap_area_list,
 		size, align, vstart, vend);
 	spin_unlock(&free_vmap_area_lock);
 
+	// 记录分配的虚拟内存区域信息
 	trace_alloc_vmap_area(addr, size, align, vstart, vend, addr == vend);
 
-	/*
-	 * If an allocation fails, the "vend" address is
-	 * returned. Therefore trigger the overflow path.
-	 */
+	// 如果分配失败，则返回错误
+	// 问题背景：
+	// 在现有的内核实现中，vmalloc 分配新虚拟内存区域的操作是通过遍历繁忙列表（busy list）来寻找空闲区域，这种方式的复杂度为 O(N)。由于随着系统运行时间的增长，繁忙列表中的区域会越来越碎片化，导致分配时间变长。在一些嵌入式设备上，这种分配时间可能会达到毫秒级别，这是不可接受的。
+
+	// 解决方案：
+	// 该补丁引入了一种改进的分配机制，将 KVA（Kernel Virtual Address）内存布局组织为从 1 到 ULONG_MAX 范围内的空闲区域。其核心思想是使用增强型红黑树（augment red-black tree）来管理空闲区域，并通过链表维护这些空闲区域按地址递增顺序排列。
+
+	// 具体优化点包括：
+	// 红黑树的使用：
+
+	// 红黑树按虚拟地址 va_start 进行排序，并在节点中维护该子树内最大可用的空闲块大小。这样可以快速找到适合分配请求的最小空闲块。
+	// 由于红黑树的特性，搜索和插入操作的复杂度为 O(log(N))，相比原来的 O(N) 提升了效率。
+	// 内存分配：
+
+	// 在分配新块时，通过红黑树进行搜索，直到找到一个合适的空闲块。如果该块比请求的大小大，则会进行分割（split）。
+	// 该分配方法是顺序分配，倾向于最大化内存局部性，从而提高性能。
+	// 内存释放：
+
+	// 在释放 vmap 区域时，首先检查是否可以与前后的空闲块合并（merge），如果可以合并，则会创建一个更大的连续空闲块。
+	// 合并操作通过链表提供的常量时间访问前后块的功能进行，从而快速检查合并条件。
+	// 缓存优化：
+
+	// 为了优化分割和合并操作中的内存分配，补丁中引入了一个 free_vmap 对象缓存，以避免频繁从 slab 中分配新结构体。
+	// 测试和性能分析：
+	// 补丁在多个平台（包括 x86_64、i686、ARM64 和 x86_64_NUMA）上进行了大量测试，使用的测试工具是内核提供的 test_vmalloc.sh。测试结果表明，该补丁大大减少了分配时间，在某些情况下从几分钟减少到几秒钟。
+
+	// 例如，测试显示：
+
+	// i5-3320M CPU：
+
+	// 运行默认内核配置时，所有测试消耗的 CPU 周期为 646,919,905,370。
+	// 使用该补丁后，消耗的 CPU 周期减少到 193,290,498,550。
+	// HiKey960（ARM64）：
+
+	// 默认内核配置下测试未能完成，而使用补丁后的测试时间为 4 分 25 秒。
+	// 总结：
+	// 这个补丁显著提高了 vmalloc 分配的效率，特别是在处理碎片化内存时。通过使用增强型红黑树来管理空闲块，并结合链表进行快速访问和合并操作，该补丁减少了分配和释放的时间，提升了内存管理的整体性能。
+	// 68ad4a3
 	if (unlikely(addr == vend))
 		goto overflow;
 
+	// 设置虚拟内存区域的起始和结束地址
 	va->va_start = addr;
 	va->va_end = addr + size;
 	va->vm = NULL;
 	va->flags = va_flags;
 
+	// 注册虚拟内存区域
 	spin_lock(&vmap_area_lock);
+	// 这段补丁描述中提出了对 vmap_area_lock 的重构，目的是进一步优化 KVA（Kernel Virtual Address）的性能。
+
+	// 背景
+	// 在 5.2 版内核中引入了一种新的内存分配方法，这为减少全局自旋锁的使用提供了可能性。全局自旋锁通常会引发高锁争用，尤其是在多核处理器并行执行任务时，这会严重影响系统性能。为了解决这个问题，作者提出了将全局锁拆分为两个独立的锁，一个用于内存分配，一个用于内存释放。
+
+	// 主要改动
+	// 锁的分离：
+
+	// 原有的全局 vmap_area_lock 被拆分为两个独立的锁，分别用于处理“空闲数据结构”和“繁忙数据结构”。
+	// 这意味着内存分配和释放操作可以在不同的 CPU 上并行进行，从而减少了锁的争用。
+	// 并行操作：
+
+	// 尽管在不同 CPU 上并行执行分配和释放操作时仍然存在一定的依赖性，但通过拆分锁，这种依赖性被大大降低。
+	// 两个锁允许在不同 CPU 上并行操作 "free" 和 "busy" 树，进一步提高了系统的并发能力。
+	// 测试结果
+	// 为了评估这个补丁，作者使用了 vmalloc test driver 进行测试，测试过程中会导致高锁争用，从而更好地衡量新方案的效果。
+
+	// 测试设备为 HiKey 960（ARM64 架构，8 核 CPU，big.LITTLE 设计）。
+
+	// 未打补丁的结果：
+
+	// CPU0 至 CPU7 的测试循环分别耗费了 457,126,382 到 384,036,264 个 CPU 周期。
+	// 打补丁后的结果：
+
+	// CPU0 至 CPU7 的测试循环分别耗费了 391,521,310 到 297,092,392 个 CPU 周期。
+	// 相比之下，打补丁后的结果在不同 CPU 上的 CPU 周期减少了 14% 到 23%。
+
+	// 总结
+	// 这个补丁通过将 vmap_area_lock 分离为两个独立的锁，从而减少了锁争用，显著提升了多核 CPU 环境下的 KVA 操作性能。测试结果显示，在 HiKey 960（ARM64）设备上，打补丁后性能提升约 14% 到 23%。这对高并发场景中的系统性能改进具有积极作用。
 	insert_vmap_area(va, &vmap_area_root, &vmap_area_list);
 	spin_unlock(&vmap_area_lock);
 
+	// 确保虚拟内存区域满足对齐和地址范围要求
 	BUG_ON(!IS_ALIGNED(va->va_start, align));
 	BUG_ON(va->va_start < vstart);
 	BUG_ON(va->va_end > vend);
 
+	// // 对分配的区域进行KASAN检查
+	// 背景
+	// CONFIG_KASAN_VMALLOC=y 是内核地址空间布局随机化（KASAN）的一个配置选项，它启用了对 vmalloc 分配的内存进行内存检测和错误报告的功能。启用这个选项后，内核在访问使用 vm_map_ram() 分配的内存时可能会发生崩溃，这是因为 vm_map_ram() 映射的内存没有相应的 KASAN 阴影内存（shadow memory）。
+
+	// KASAN 的阴影内存用于跟踪实际内存访问是否有效。如果没有为特定内存区域设置阴影内存，KASAN 会报告非法访问，从而导致崩溃。
+
+	// 修复方案
+	// 为了修复这个问题，补丁的解决方案是将 kasan_populate_vmalloc() 调用移动到 alloc_vmap_area() 函数中，而不是在 vmalloc 代码的各个地方添加额外的 kasan_populate_vmalloc() 调用。
+
+	// 主要改动
+	// 移除冗余调用：通过将 kasan_populate_vmalloc() 集中到 alloc_vmap_area() 函数中，避免了在 vmalloc 代码中散布多个 KASAN 相关调用，简化了代码逻辑。
+
+	// 修复 vm_map_ram() 崩溃问题：这种做法确保了 vm_map_ram() 分配的内存能够正确地与 KASAN 阴影内存对应，避免了因为阴影内存缺失导致的崩溃问题。
 	ret = kasan_populate_vmalloc(addr, size);
 	if (ret) {
 		free_vmap_area(va);
 		return ERR_PTR(ret);
 	}
 
+	// 返回成功分配的虚拟内存区域
 	return va;
 
 overflow:
@@ -2538,13 +2813,28 @@ static void vmap_init_free_space(void)
 	}
 }
 
+/**
+ * 初始化vmalloc的虚拟内存区域
+ *
+ * 该函数在分配vmalloc虚拟内存区域时被调用，用于设置虚拟内存区域的相关参数。
+ *
+ * @param vm 指向vm_struct结构的指针，用于描述虚拟内存区域
+ * @param va 指向vmap_area结构的指针，包含虚拟地址范围
+ * @param flags 虚拟内存区域的标志，控制区域的特性和访问权限
+ * @param caller 调用者信息，用于跟踪和调试
+ */
 static inline void setup_vmalloc_vm_locked(struct vm_struct *vm,
 	struct vmap_area *va, unsigned long flags, const void *caller)
 {
+	// 设置虚拟内存区域的标志
 	vm->flags = flags;
+	// 设置虚拟内存区域的起始地址
 	vm->addr = (void *)va->va_start;
+	// 计算并设置虚拟内存区域的大小
 	vm->size = va->va_end - va->va_start;
+	// 记录调用者信息
 	vm->caller = caller;
+	// 将vm_struct指针关联到vmap_area结构中
 	va->vm = vm;
 }
 
@@ -2567,6 +2857,22 @@ static void clear_vm_uninitialized_flag(struct vm_struct *vm)
 	vm->flags &= ~VM_UNINITIALIZED;
 }
 
+/**
+ * __get_vm_area_node - 分配和初始化一个新的 vm_struct 实例
+ * @size: 请求的虚拟内存区域的大小
+ * @align: 对齐要求
+ * @shift: 对数移位值，用于计算对齐
+ * @flags: 内存区域的标志，如VM_IOREMAP、VM_ALLOC等
+ * @start: 内存区域的起始地址
+ * @end: 内存区域的结束地址
+ * @node: NUMA节点
+ * @gfp_mask: 内存分配标志
+ * @caller: 调用者地址，用于调试
+ *
+ * 该函数用于分配一个新的 vm_struct 实例，并根据给定的参数初始化它。
+ * 它确保分配的虚拟内存区域满足对齐要求，并根据标志设置访问权限。
+ * 如果分配失败或参数不合法，函数返回NULL。
+ */
 static struct vm_struct *__get_vm_area_node(unsigned long size,
 		unsigned long align, unsigned long shift, unsigned long flags,
 		unsigned long start, unsigned long end, int node,
@@ -2576,30 +2882,59 @@ static struct vm_struct *__get_vm_area_node(unsigned long size,
 	struct vm_struct *area;
 	unsigned long requested_size = size;
 
+	/* 确保不在中断上下文中 */
+	// 在内核开发中，__vmalloc 函数用于分配虚拟内存。如果在原子上下文中使用 __vmalloc 并传递 GFP_ATOMIC 标志（表示内存分配不能引起阻塞），那么调用链会导致 __get_vm_area_node 函数使用 GFP_KERNEL 标志来为 vm_struct 分配内存。
+
+	// GFP_KERNEL 是一种分配标志，表示可以进行阻塞式内存分配。而在原子上下文中（即不能被中断或调度的代码执行路径），这种阻塞行为是被禁止的。因此，__get_vm_area_node 使用 GFP_KERNEL 标志时，会触发 "sleeping from invalid context" 警告，即尝试在不允许阻塞的上下文中进行可能阻塞的操作。
+
+	// 解决方案：
+	// 这个补丁的解决方法是将 __vmalloc 函数传递的内存分配标志（如 GFP_ATOMIC）继续传递到 __get_vm_area_node 函数中，使得 __get_vm_area_node 在原子上下文中也使用 GFP_ATOMIC 进行分配，从而避免触发阻塞行为，解决了 "sleeping from invalid context" 的警告。
 	BUG_ON(in_interrupt());
+
+	/* 根据移位值对请求的大小进行对齐 */
+	// 背景：
+	// KASAN 是一个用于检测内存越界访问（OOB, Out-Of-Bounds）和内存使用后释放错误的内核工具。它通过影子内存（shadow memory）跟踪每个字节的内存使用情况，并标记哪些内存是可以访问的。
+
+	// vmalloc 函数用于分配虚拟内存，可能在某些情况下需要分配大页（hugepage）以优化性能。
+
+	// 问题描述：
+	// 在提交 121e6f3258fe 中，__vmalloc_node_range 函数的实现发生了变化。这个变化导致 __get_vm_area_node 函数不再使用 vmalloc 分配的真实大小，而是使用一个向上取整的大小。
+
+	// 这个向上取整的大小在调用 kasan_unpoison_vmalloc() 函数时会出现问题。具体来说，KASAN 期望只标记实际分配的内存为可访问的，但由于尺寸被向上取整，导致 KASAN 标记了比实际分配内存更多的内存为可访问的。这会导致无法检测到 vmalloc 的越界访问错误，并导致 KASAN 的单元测试失败。
+
+	// 解决方案：
+	// 真实大小传递：为了修复这个问题，补丁将真实的 vmalloc 分配大小和期望的内存对齐方式传递给 __get_vm_area_node 函数。这使得 KASAN 可以准确地解除影子内存中的毒化状态（unpoison），仅允许访问实际分配的内存。
+
+	// 其他调用点调整：补丁还调整了其他调用 __get_vm_area_node 的地方，确保传入 PAGE_SHIFT 作为对齐值，以保持一致性。
 	size = ALIGN(size, 1ul << shift);
 	if (unlikely(!size))
 		return NULL;
 
+	/* 对IO重映射进行特殊处理 */
 	if (flags & VM_IOREMAP)
 		align = 1ul << clamp_t(int, get_count_order_long(size),
 				       PAGE_SHIFT, IOREMAP_MAX_ORDER);
 
+	/* 分配vm_struct实例 */
 	area = kzalloc_node(sizeof(*area), gfp_mask & GFP_RECLAIM_MASK, node);
 	if (unlikely(!area))
 		return NULL;
 
+	/* 默认在分配区域后添加一个保护页 */
 	if (!(flags & VM_NO_GUARD))
 		size += PAGE_SIZE;
 
+	/* 分配vmap_area结构并初始化 */
 	va = alloc_vmap_area(size, align, start, end, node, gfp_mask, 0);
 	if (IS_ERR(va)) {
 		kfree(area);
 		return NULL;
 	}
 
+	/* 设置vm_struct实例的内部结构 */
 	setup_vmalloc_vm(area, va, flags, caller);
 
+	/* 对非VM_ALLOC映射的页面标记为可访问 */
 	/*
 	 * Mark pages for non-VM_ALLOC mappings as accessible. Do it now as a
 	 * best-effort approach, as they can be mapped outside of vmalloc code.
@@ -2995,30 +3330,24 @@ vm_area_alloc_pages(gfp_t gfp, int nid,
 	int i;
 
 	/*
-	 * For order-0 pages we make use of bulk allocator, if
-	 * the page array is partly or not at all populated due
-	 * to fails, fallback to a single page allocator that is
-	 * more permissive.
+	 * 对于order-0页面，我们使用批量分配器进行分配，如果由于失败，
+	 * 页面数组部分或完全未被填充，则回退到更宽容的单页面分配器。
 	 */
 	if (!order) {
-		/* bulk allocator doesn't support nofail req. officially */
+		/* 批量分配器官方不支持nofail要求 */
 		gfp_t bulk_gfp = gfp & ~__GFP_NOFAIL;
 
 		while (nr_allocated < nr_pages) {
 			unsigned int nr, nr_pages_request;
 
 			/*
-			 * A maximum allowed request is hard-coded and is 100
-			 * pages per call. That is done in order to prevent a
-			 * long preemption off scenario in the bulk-allocator
-			 * so the range is [1:100].
+			 * 每次请求的最大允许页面数为100页，以防止在批量分配器中
+			 * 出现长时间抢占关闭的情况。因此请求范围为[1:100]。
 			 */
 			nr_pages_request = min(100U, nr_pages - nr_allocated);
 
-			/* memory allocation should consider mempolicy, we can't
-			 * wrongly use nearest node when nid == NUMA_NO_NODE,
-			 * otherwise memory may be allocated in only one node,
-			 * but mempolicy wants to alloc memory by interleaving.
+			/* 内存分配应考虑内存策略，当nid为NUMA_NO_NODE时不能错误地使用最近节点，
+			 * 否则可能会只在一个节点上分配内存，而内存策略可能希望交错分配。
 			 */
 			if (IS_ENABLED(CONFIG_NUMA) && nid == NUMA_NO_NODE)
 				nr = alloc_pages_bulk_array_mempolicy(bulk_gfp,
@@ -3034,23 +3363,20 @@ vm_area_alloc_pages(gfp_t gfp, int nid,
 			cond_resched();
 
 			/*
-			 * If zero or pages were obtained partly,
-			 * fallback to a single page allocator.
+			 * 如果没有获得足够的页面或部分获得页面，则回退到单页面分配器。
 			 */
 			if (nr != nr_pages_request)
 				break;
 		}
 	} else if (gfp & __GFP_NOFAIL) {
 		/*
-		 * Higher order nofail allocations are really expensive and
-		 * potentially dangerous (pre-mature OOM, disruptive reclaim
-		 * and compaction etc.
+		 * 高阶nofail分配非常昂贵且潜在危险（如过早OOM，破坏性回收和整理等）。
 		 */
 		alloc_gfp &= ~__GFP_NOFAIL;
 		nofail = true;
 	}
 
-	/* High-order pages or fallback path if "bulk" fails. */
+	/* 处理高阶页面或当“批量”分配失败时的回退路径。 */
 	while (nr_allocated < nr_pages) {
 		if (fatal_signal_pending(current))
 			break;
@@ -3063,26 +3389,23 @@ vm_area_alloc_pages(gfp_t gfp, int nid,
 			if (!nofail)
 				break;
 
-			/* fall back to the zero order allocations */
+			/* 回退到零阶分配 */
 			alloc_gfp |= __GFP_NOFAIL;
 			order = 0;
 			continue;
 		}
 
 		/*
-		 * Higher order allocations must be able to be treated as
-		 * indepdenent small pages by callers (as they can with
-		 * small-page vmallocs). Some drivers do their own refcounting
-		 * on vmalloc_to_page() pages, some use page->mapping,
-		 * page->lru, etc.
+		 * 高阶分配必须能够被调用者视为独立的小页面（如同小页面vmalloc一样）。
+		 * 一些驱动程序在其自己的引用计数上使用vmalloc_to_page()页面，
+		 * 有些使用page->mapping, page->lru等。
 		 */
 		if (order)
 			split_page(page, order);
 
 		/*
-		 * Careful, we allocate and map page-order pages, but
-		 * tracking is done per PAGE_SIZE page so as to keep the
-		 * vm_struct APIs independent of the physical/mapped size.
+		 * 尽管我们分配和映射的是页面顺序大小的页面，但跟踪是以PAGE_SIZE页面为单位，
+		 * 以保持vm_struct API与物理/映射大小无关。
 		 */
 		for (i = 0; i < (1U << order); i++)
 			pages[nr_allocated + i] = page + i;
@@ -3094,26 +3417,52 @@ vm_area_alloc_pages(gfp_t gfp, int nid,
 	return nr_allocated;
 }
 
+/*
+ * 为虚拟内存区域分配物理页面
+ *
+ * 此函数为给定的虚拟内存区域 (area) 分配足够的物理页面。
+ * 它根据指定的页面转换保护 (prot) 和页面移位量 (page_shift) 来执行分配操作。
+ *
+ * 参数:
+ *   area   - 虚拟内存区域结构指针
+ *   gfp_mask   - 分配器标志
+ *   prot    - 页面转换保护
+ *   page_shift - 页面移位量
+ *   node    - 用于分配的节点
+ *
+ * 返回:
+ *   分配的虚拟内存区域的起始地址，如果分配失败则返回 NULL。
+ */
 static void *__vmalloc_area_node(struct vm_struct *area, gfp_t gfp_mask,
 				 pgprot_t prot, unsigned int page_shift,
 				 int node)
 {
+	// 定义本地gfp标志，用于实际的内存分配
 	const gfp_t nested_gfp = (gfp_mask & GFP_RECLAIM_MASK) | __GFP_ZERO;
+	// 标记是否禁止分配失败
 	bool nofail = gfp_mask & __GFP_NOFAIL;
+	// 虚拟内存区域的起始地址
 	unsigned long addr = (unsigned long)area->addr;
+	// 虚拟内存区域的大小
 	unsigned long size = get_vm_area_size(area);
+	// 用于存储页面数组的大小
 	unsigned long array_size;
+	// 计算该区域包含的小页面数量
 	unsigned int nr_small_pages = size >> PAGE_SHIFT;
+	// 用于分配的页面顺序
 	unsigned int page_order;
+	// 临时变量，用于存储分配结果
 	unsigned int flags;
 	int ret;
 
+	// 计算页面数组的大小
 	array_size = (unsigned long)nr_small_pages * sizeof(struct page *);
 
+	// 如果gfp_mask中没有指定GFP_DMA或GFP_DMA32，则添加__GFP_HIGHMEM标志
 	if (!(gfp_mask & (GFP_DMA | GFP_DMA32)))
 		gfp_mask |= __GFP_HIGHMEM;
 
-	/* Please note that the recursion is strictly bounded. */
+	// 递归分配页面数组
 	if (array_size > PAGE_SIZE) {
 		area->pages = __vmalloc_node(array_size, 1, nested_gfp, node,
 					area->caller);
@@ -3121,6 +3470,7 @@ static void *__vmalloc_area_node(struct vm_struct *area, gfp_t gfp_mask,
 		area->pages = kmalloc_node(array_size, nested_gfp, node);
 	}
 
+	// 如果页面数组分配失败，发出警告并释放虚拟内存区域，返回NULL
 	if (!area->pages) {
 		warn_alloc(gfp_mask, NULL,
 			"vmalloc error: size %lu, failed to allocated page array size %lu",
@@ -3129,13 +3479,17 @@ static void *__vmalloc_area_node(struct vm_struct *area, gfp_t gfp_mask,
 		return NULL;
 	}
 
+	// 设置虚拟内存区域的页面顺序
 	set_vm_area_page_order(area, page_shift - PAGE_SHIFT);
 	page_order = vm_area_page_order(area);
 
+	// 分配物理页面
 	area->nr_pages = vm_area_alloc_pages(gfp_mask | __GFP_NOWARN,
 		node, page_order, nr_small_pages, area->pages);
 
+	// 更新vmalloc页面计数器
 	atomic_long_add(area->nr_pages, &nr_vmalloc_pages);
+	// 如果设置了__GFP_ACCOUNT标志，则更新memory cgroup页面状态
 	if (gfp_mask & __GFP_ACCOUNT) {
 		int i;
 
@@ -3143,21 +3497,8 @@ static void *__vmalloc_area_node(struct vm_struct *area, gfp_t gfp_mask,
 			mod_memcg_page_state(area->pages[i], MEMCG_VMALLOC, 1);
 	}
 
-	/*
-	 * If not enough pages were obtained to accomplish an
-	 * allocation request, free them via vfree() if any.
-	 */
+	// 如果分配的页面数量不足，发出警告并跳转到失败处理
 	if (area->nr_pages != nr_small_pages) {
-		/*
-		 * vm_area_alloc_pages() can fail due to insufficient memory but
-		 * also:-
-		 *
-		 * - a pending fatal signal
-		 * - insufficient huge page-order pages
-		 *
-		 * Since we always retry allocations at order-0 in the huge page
-		 * case a warning for either is spurious.
-		 */
 		if (!fatal_signal_pending(current) && page_order == 0)
 			warn_alloc(gfp_mask, NULL,
 				"vmalloc error: size %lu, failed to allocate pages",
@@ -3165,15 +3506,13 @@ static void *__vmalloc_area_node(struct vm_struct *area, gfp_t gfp_mask,
 		goto fail;
 	}
 
-	/*
-	 * page tables allocations ignore external gfp mask, enforce it
-	 * by the scope API
-	 */
+	// 根据gfp_mask设置内存分配标志
 	if ((gfp_mask & (__GFP_FS | __GFP_IO)) == __GFP_IO)
 		flags = memalloc_nofs_save();
 	else if ((gfp_mask & (__GFP_FS | __GFP_IO)) == 0)
 		flags = memalloc_noio_save();
 
+	// 尝试映射页面，如果设置了__GFP_NOFAIL标志且映射失败，则调度器等待
 	do {
 		ret = vmap_pages_range(addr, addr + size, prot, area->pages,
 			page_shift);
@@ -3181,11 +3520,13 @@ static void *__vmalloc_area_node(struct vm_struct *area, gfp_t gfp_mask,
 			schedule_timeout_uninterruptible(1);
 	} while (nofail && (ret < 0));
 
+	// 恢复内存分配标志
 	if ((gfp_mask & (__GFP_FS | __GFP_IO)) == __GFP_IO)
 		memalloc_nofs_restore(flags);
 	else if ((gfp_mask & (__GFP_FS | __GFP_IO)) == 0)
 		memalloc_noio_restore(flags);
 
+	// 如果页面映射失败，发出警告并跳转到失败处理
 	if (ret < 0) {
 		warn_alloc(gfp_mask, NULL,
 			"vmalloc error: size %lu, failed to map pages",
@@ -3193,9 +3534,11 @@ static void *__vmalloc_area_node(struct vm_struct *area, gfp_t gfp_mask,
 		goto fail;
 	}
 
+	// 分配成功，返回虚拟内存区域的起始地址
 	return area->addr;
 
 fail:
+	// 分配失败，释放已分配的虚拟内存区域地址并返回NULL
 	vfree(area->addr);
 	return NULL;
 }
@@ -3243,6 +3586,8 @@ void *__vmalloc_node_range(unsigned long size, unsigned long align,
 	if (WARN_ON_ONCE(!size))
 		return NULL;
 
+	// 检查请求的vmalloc区域大小是否超过物理内存总页数
+	// 如果超过，发出错误警告并返回NULL
 	if ((size >> PAGE_SHIFT) > totalram_pages()) {
 		warn_alloc(gfp_mask, NULL,
 			"vmalloc error: size %lu, exceeds total pages",
@@ -3250,55 +3595,66 @@ void *__vmalloc_node_range(unsigned long size, unsigned long align,
 		return NULL;
 	}
 
+	// 当全局变量vmap_allow_huge被设置，并且vm_flags标志中包含VM_ALLOW_HUGE_VMAP时，尝试使用大页面进行内存映射
 	if (vmap_allow_huge && (vm_flags & VM_ALLOW_HUGE_VMAP)) {
 		unsigned long size_per_node;
 
 		/*
-		 * Try huge pages. Only try for PAGE_KERNEL allocations,
-		 * others like modules don't yet expect huge pages in
-		 * their allocations due to apply_to_page_range not
-		 * supporting them.
-		 */
+		* 尝试使用大页面。只在PAGE_KERNEL类型的分配中尝试，
+		* 对于其他如模块的分配，由于apply_to_page_range不支持它们，
+		* 因此这些分配不期望在他们的分配中使用大页面。
+		*/
 
+		// 初始化每个节点的大小
 		size_per_node = size;
+		// 如果未指定节点，则将总大小按在线节点数均分
 		if (node == NUMA_NO_NODE)
 			size_per_node /= num_online_nodes();
+		// 根据保护类型和每个节点的大小，决定是使用PMD级别还是更低级别的页表
 		if (arch_vmap_pmd_supported(prot) && size_per_node >= PMD_SIZE)
 			shift = PMD_SHIFT;
 		else
 			shift = arch_vmap_pte_supported_shift(size_per_node);
 
+		// 根据实际对齐要求和页表偏移量，确定最终的对齐值
 		align = max(real_align, 1UL << shift);
+		// 根据实际大小和页表偏移量，对大小进行对齐
 		size = ALIGN(real_size, 1UL << shift);
 	}
 
+// 尝试分配VM区域。如果分配失败且分配标志中设置了__GFP_NOFAIL标志，则会重新尝试分配。
 again:
+    // 调用__get_vm_area_node来分配VM区域。参数包括区域大小、对齐方式、页表项偏移、VM标志、起始地址、结束地址、节点、分配标志和调用者信息。
 	area = __get_vm_area_node(real_size, align, shift, VM_ALLOC |
 				  VM_UNINITIALIZED | vm_flags, start, end, node,
 				  gfp_mask, caller);
 	if (!area) {
+		// 检查是否设置了__GFP_NOFAIL标志，如果设置了，则不认为分配失败，而是重新尝试分配。
 		bool nofail = gfp_mask & __GFP_NOFAIL;
+		// 如果分配失败，打印警告信息。如果设置了__GFP_NOFAIL标志，则会重新尝试分配。
 		warn_alloc(gfp_mask, NULL,
 			"vmalloc error: size %lu, vm_struct allocation failed%s",
 			real_size, (nofail) ? ". Retrying." : "");
 		if (nofail) {
+			// 如果设置了__GFP_NOFAIL标志，等待一段时间后重新尝试分配。
 			schedule_timeout_uninterruptible(1);
 			goto again;
 		}
+		// 如果没有设置__GFP_NOFAIL标志，分配失败，跳转到fail。
 		goto fail;
 	}
 
-	/*
-	 * Prepare arguments for __vmalloc_area_node() and
-	 * kasan_unpoison_vmalloc().
-	 */
+	// 准备__vmalloc_area_node和kasan_unpoison_vmalloc的参数。
 	if (pgprot_val(prot) == pgprot_val(PAGE_KERNEL)) {
+		// 如果页表项的保护位为PAGE_KERNEL，且KASAN硬件标签功能已启用，则修改保护位以允许标签，并跳过页分配的中毒和置零。
 		if (kasan_hw_tags_enabled()) {
+			// 修改保护位以允许标签。这必须在映射之前完成。
 			/*
 			 * Modify protection bits to allow tagging.
 			 * This must be done before mapping.
 			 */
 			prot = arch_vmap_pgprot_tagged(prot);
+			// 跳过页分配的中毒和置零。这些操作将由kasan_unpoison_vmalloc完成。
 
 			/*
 			 * Skip page_alloc poisoning and zeroing for physical
@@ -3307,16 +3663,19 @@ again:
 			 */
 			gfp_mask |= __GFP_SKIP_KASAN | __GFP_SKIP_ZERO;
 		}
-
-		/* Take note that the mapping is PAGE_KERNEL. */
+		// 记录该映射为PAGE_KERNEL。
 		kasan_flags |= KASAN_VMALLOC_PROT_NORMAL;
 	}
 
-	/* Allocate physical pages and map them into vmalloc space. */
+	// 分配物理页面并将它们映射到vmalloc空间中。
 	ret = __vmalloc_area_node(area, gfp_mask, prot, shift, node);
 	if (!ret)
 		goto fail;
 
+	// 现在页面已经被映射，标记它们为可访问。
+	// 设置KASAN_VMALLOC_INIT的条件应该与post_alloc_hook()中的条件相补充，
+	// 关于__GFP_SKIP_ZERO的检查，以确保在相同的条件下内存被初始化。
+	// 基于标签的KASAN模式只对正常的非可执行分配分配标签，详见__kasan_unpoison_vmalloc()。
 	/*
 	 * Mark the pages as accessible, now that they are mapped.
 	 * The condition for setting KASAN_VMALLOC_INIT should complement the
@@ -3329,8 +3688,12 @@ again:
 	if (!want_init_on_free() && want_init_on_alloc(gfp_mask) &&
 	    (gfp_mask & __GFP_SKIP_ZERO))
 		kasan_flags |= KASAN_VMALLOC_INIT;
-	/* KASAN_VMALLOC_PROT_NORMAL already set if required. */
+	// 如果需要，KASAN_VMALLOC_PROT_NORMAL已经设置。
 	area->addr = kasan_unpoison_vmalloc(area->addr, real_size, kasan_flags);
+
+	// 在这个函数中，新分配的vm_struct具有VM_UNINITIALIZED标志。
+	// 这意味着vm_struct尚未完全初始化。
+	// 现在，它已经完全初始化，所以在这里移除这个标志。
 
 	/*
 	 * In this function, newly allocated vm_struct has VM_UNINITIALIZED
@@ -3339,13 +3702,17 @@ again:
 	 */
 	clear_vm_uninitialized_flag(area);
 
+	// 对size进行页对齐。
 	size = PAGE_ALIGN(size);
+	// 如果vm_flags中没有设置VM_DEFER_KMEMLEAK标志，则报告内存泄漏。
 	if (!(vm_flags & VM_DEFER_KMEMLEAK))
 		kmemleak_vmalloc(area, size, gfp_mask);
 
+	// 返回分配的地址。
 	return area->addr;
 
 fail:
+	// 如果shift大于PAGE_SHIFT，则重置shift，对齐和大小，并重新尝试分配。
 	if (shift > PAGE_SHIFT) {
 		shift = PAGE_SHIFT;
 		align = real_align;
@@ -3353,6 +3720,7 @@ fail:
 		goto again;
 	}
 
+	// 分配失败，返回NULL。
 	return NULL;
 }
 
@@ -3375,9 +3743,30 @@ fail:
  *
  * Return: pointer to the allocated memory or %NULL on error
  */
+/**
+ * __vmalloc_node - 从指定节点分配vmalloc内存
+ *
+ * 该函数用于从系统内存的vmalloc区域中分配一段内存。这段内存的大小由'size'参数指定，
+ * 并且会尝试满足由'align'参数指定的内存对齐要求。'gfp_mask'参数决定了内存分配时的
+ * 扰动等级（例如，可以是GFP_KERNEL，表示可以在中断上下文中安全地分配内存）。
+ * 'node'参数指定了应该从哪个NUMA节点进行内存分配。'caller'参数通常用于调试目的，
+ * 可以记录下调用__vmalloc_node函数的代码位置。
+ *
+ * 参数:
+ * @size: 要分配的内存大小（以字节为单位）
+ * @align: 请求的内存对齐大小
+ * @gfp_mask: 内存分配的扰动等级掩码
+ * @node: 指定的NUMA节点
+ * @caller: 调用__vmalloc_node的函数地址
+ *
+ * 返回:
+ * 分配的内存指针。如果分配失败，可能返回NULL指针。
+ */
 void *__vmalloc_node(unsigned long size, unsigned long align,
 			    gfp_t gfp_mask, int node, const void *caller)
 {
+	// 调用__vmalloc_node_range函数，指定vmalloc内存区域的起始和结束地址
+	// VMALLOC_START和VMALLOC_END定义了vmalloc内存区域的范围
 	return __vmalloc_node_range(size, align, VMALLOC_START, VMALLOC_END,
 				gfp_mask, PAGE_KERNEL, 0, node, caller);
 }
@@ -3409,11 +3798,64 @@ EXPORT_SYMBOL(__vmalloc);
  *
  * Return: pointer to the allocated memory or %NULL on error
  */
+/**
+ * vmalloc - 虚拟内存分配
+ *
+ * 此函数用于分配一块连续的虚拟内存区域。
+ * 主要用于内核级别的内存分配，支持硬件无关的页表和大块连续内存。
+ *
+ * @size: 要分配的内存块大小（以字节为单位）。
+ *
+ * 返回: 分配成功时返回指向分配内存块的指针，
+ *       分配失败时返回 NULL。
+ *
+ * 在 ARM64 架构下，虚拟地址到物理地址的转换机制依赖于特定的内核地址映射规则。以下是对 ARM64 架构中虚实地址转换的概述：
+ *
+ * ### 1. **直接映射区域（Direct-Mapped Region）**
+ *
+ * 内核空间中的一部分区域是直接映射的，通常称为 `linear mapping` 或 `direct mapping` 区域。
+ * 在这个区域内，虚拟地址与物理地址之 * 间有一个固定的偏移量，称为 `PAGE_OFFSET`。
+ *
+ * - **虚拟地址范围：** 从 `PAGE_OFFSET` 开始的地址范围（例如 `0xffff800000000000` 到 `0xffffffffffffffff`）。
+ * - **物理地址范围：** 对应的物理地址范围（例如 `0x00000000` 到 `0xffffffffff`）。
+ * - **转换方式：** 直接减去或加上偏移量即可完成虚拟地址与物理地址的转换。
+ * 这部分地址可以通过简单的加减法在虚拟地址和物理地址之间转 * 换，因此访问开销较低。
+ *
+ * ### 2. **高内核地址（High Memory Region）** ARM64是不是不存在这部分地址?
+ *
+ * 高内核地址区域指的是虚拟地址映射到物理内存高位地址的部分，这些地址不能直接通过简单的加减法进行转换，通常需要通过页表进行映射。
+ *
+ * - **虚拟地址范围：** 通常是指用户空间与内核空间之间的过渡区域或更高的内存区域。
+ * - **转换方式：** 需要通过页表查找才能获得物理地址，不能直接进行虚实地址转换。
+ *
+ * ### 3. **设备地址（Device Mappings）**
+ *
+ * 在 ARM64 架构中，设备的内存映射区域通常通过 `ioremap` 函数进行映射。
+ * 这些地址与物理地址的关系并不是线性的，无法直接通过加减偏移 * 量进行转换。
+ *
+ * - **虚拟地址范围：** 设备映射的虚拟地址。
+ * - **转换方式：** 需要通过映射函数来进行访问，不能直接转换。
+ *
+ * ### 4. **模块区域（Module Region）**
+ *
+ * 内核模块和某些内核动态加载的区域在内存中的位置也是动态映射的，通常不能通过简单的加减法进行虚实地址的转换。
+ *
+ * - **虚拟地址范围：** 内核模块加载的区域。
+ * - **转换方式：** 需要通过页表查找。
+ *
+ * ### 总结
+ *
+ * - **可以直接转换的区域：** 线性映射区域（`linear mapping`）。
+ * - **不可以直接转换的区域：** 高内核地址、设备映射地址、模块加载区域等。
+ *
+ * 你可以根据这个概念，结合实际开发中的需求，来确定是否需要虚实地址直接转换，或者是否需要借助页表查找。
+ */
 void *vmalloc(unsigned long size)
 {
 	return __vmalloc_node(size, 1, GFP_KERNEL, NUMA_NO_NODE,
 				__builtin_return_address(0));
 }
+
 EXPORT_SYMBOL(vmalloc);
 
 /**
