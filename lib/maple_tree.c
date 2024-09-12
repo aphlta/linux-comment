@@ -49,7 +49,38 @@
  * the entire data set, or one half of the tree, or the middle half of the tree.
  *
  */
-
+/*
+ * DOC: Maple Tree有趣实现细节
+ *
+ * 每个节点类型都有一组槽用于条目和一组槽用于Pivot。在密集节点的情况下，Pivot由位置隐含，仅仅是槽索引加上节点的最小值。
+ *
+ * 在常规B树术语中，Pivot被称为键。术语“Pivot”用于指示树正在指定范围，Pivot可能出现在具有附加到值的条目的子树中，
+ * 而键对于B树的特定位置是唯一的。Pivot值包括具有相同索引的槽。
+ *
+ *
+ * 下图说明了range64节点的槽和Pivot的布局。
+ *
+ *
+ *  槽  -> | 0 | 1 | 2 | ... | 12 | 13 | 14 | 15 |
+ *        ┬   ┬   ┬   ┬     ┬    ┬    ┬    ┬    ┬
+ *        │   │   │   │     │    │    │    │    └─ 隐含最大值
+ *        │   │   │   │     │    │    │    └─ Pivot 14
+ *        │   │   │   │     │    │    └─ Pivot 13
+ *        │   │   │   │     │    └─ Pivot 12
+ *        │   │   │   │     └─ Pivot 11
+ *        │   │   │   └─ Pivot 2
+ *        │   │   └─ Pivot 1
+ *        │   └─ Pivot 0
+ *        └─  隐含最小值
+ *
+ * 槽内容：
+ *  内部（非叶）节点包含指向其他节点的指针。
+ *  叶节点包含条目。
+ *
+ * 感兴趣的位置通常称为偏移。所有偏移都有一个槽，但最后一个偏移有一个从上方节点（或根节点的UINT_MAX）隐含的Pivot。
+ *
+ * 范围会复杂化某些写入活动。在修改任何B树变体时，已知将添加或删除一个条目。在修改Maple Tree时，一个存储操作可能会覆盖整个数据集，或者树的一半，或者树的中间部分。
+ */
 
 #include <linux/maple_tree.h>
 #include <linux/xarray.h>
@@ -69,6 +100,23 @@
  * * MA_STATE_BULK		- Bulk insert mode
  * * MA_STATE_REBALANCE		- Indicate a rebalance during bulk insert
  * * MA_STATE_PREALLOC		- Preallocated nodes, WARN_ON allocation
+ */
+/*
+ * Maple state flags
+ * 下面定义了一组状态标志，用于表示Maple数据结构的不同状态。
+ * 这些状态标志可以帮助我们了解Maple在执行不同操作时的状态。
+ *
+ * MA_STATE_BULK		- Bulk insert mode
+ *                     当设置此标志时，表示Maple处于批量插入模式。
+ *                     在这种模式下，可能会有多个节点被预先分配。
+ *
+ * MA_STATE_REBALANCE		- Indicate a rebalance during bulk insert
+ *                     此标志表示在批量插入过程中发生了重新平衡操作。
+ *                     这有助于我们在批量插入期间保持数据结构的平衡。
+ *
+ * MA_STATE_PREALLOC		- Preallocated nodes, WARN_ON allocation
+ *                     当此标志被设置时，表示Maple的节点已经被预先分配。
+ *                     在这种情况下，如果再尝试分配节点，将会触发警告。
  */
 #define MA_STATE_BULK		1
 #define MA_STATE_REBALANCE	2
@@ -134,6 +182,10 @@ struct maple_big_node {
  * The maple_subtree_state is used to build a tree to replace a segment of an
  * existing tree in a more atomic way.  Any walkers of the older tree will hit a
  * dead node and restart on updates.
+ */
+/*
+ * maple_subtree_state 的作用是构建一棵树以替代现有树中的一段结构，以一种更为原子化的方式。
+ * 这样做可以确保任何遍历旧树的进程在遭遇失效节点时，会重新启动更新过程。
  */
 struct maple_subtree_state {
 	struct ma_state *orig_l;	/* Original left side of subtree */
@@ -229,6 +281,9 @@ static inline bool mte_is_leaf(const struct maple_enode *entry)
  * We also reserve values with the bottom two bits set to '10' which are
  * below 4096
  */
+/*
+ * 我们还预留了值，其中最低两位设置为 '10'，且这些值低于 4096
+ */
 static inline bool mt_is_reserved(const void *entry)
 {
 	return ((unsigned long)entry < MAPLE_RESERVED_RANGE) &&
@@ -255,15 +310,27 @@ bool mas_is_err(struct ma_state *mas)
 	return xa_is_err(mas->node);
 }
 
+/**
+ * 判断给定的 ma_state 结构体是否可搜索
+ *
+ * 此函数主要用于确定一个类型的实例是否处于可以进行搜索操作的状态
+ * 它通过排除某些特定的状态来实现这一点
+ *
+ * @param mas 指向 ma_state 结构体的指针，该结构体表示类型的实例
+ * @return 如果类型实例可搜索，则返回 true；否则返回 false
+ */
 static inline bool mas_searchable(struct ma_state *mas)
 {
-	if (mas_is_none(mas))
-		return false;
+    // 如果类型实例处于 none 状态，则不可搜索
+    if (mas_is_none(mas))
+        return false;
 
-	if (mas_is_ptr(mas))
-		return false;
+    // 如果类型实例是一个指针，则不可搜索
+    if (mas_is_ptr(mas))
+        return false;
 
-	return true;
+    // 类型实例可搜索
+    return true;
 }
 
 static inline struct maple_node *mte_to_node(const struct maple_enode *entry)
@@ -384,6 +451,25 @@ static inline bool mt_is_alloc(struct maple_tree *mt)
  *  0b110 : 64 bit values, type in 0-2, slot in 3-7
  */
 
+/*
+ * 父节点指针
+ * 除了根节点外，父节点指针与其他所有树节点一样，对齐到256字节。
+ * 在存储32位或64位值时，偏移量可以放入5位中。16位值需要一个额外的位来存储偏移量。
+ * 这个额外的位来自于对节点类型中最后一个位的再利用。通过使用位1来指示位2是类型的一部分还是槽位的一部分，
+ * 这是可能的。
+ *
+ * 节点类型说明：
+ *  0x??1 = 根节点
+ *  0x?00 = 16位节点
+ *  0x010 = 32位节点
+ *  0x110 = 64位节点
+ *
+ * 槽大小和对齐:
+ *  0b??1 : 根节点
+ *  0b?00 : 16位值，类型在0-1位，槽在2-7位
+ *  0b010 : 32位值，类型在0-2位，槽在3-7位
+ *  0b110 : 64位值，类型在0-2位，槽在3-7位
+ */
 #define MAPLE_PARENT_ROOT		0x01
 
 #define MAPLE_PARENT_SLOT_SHIFT		0x03
@@ -567,6 +653,16 @@ static inline bool mte_dead_node(const struct maple_enode *enode)
  *
  * Return: The total number of nodes allocated
  */
+/*
+ * mas_allocated() - 获取一个maple状态中分配的节点数量。
+ * @mas: The maple state
+ *
+ * maple状态的alloc成员被重载以保存第一个已分配节点的指针或要分配的节点数量的总数。
+ * 如果第0位被设置，那么alloc包含要请求的节点数量。如果有一个已分配的节点，
+ * 那么总分配节点数就在该节点中。
+ *
+ * Return: 返回总共分配的节点数量
+ */
 static inline unsigned long mas_allocated(const struct ma_state *mas)
 {
 	if (!mas->alloc || ((unsigned long)mas->alloc & 0x1))
@@ -584,6 +680,15 @@ static inline unsigned long mas_allocated(const struct ma_state *mas)
  * located in @mas->alloc->request_count, or directly in @mas->alloc if there is
  * no allocated node.  Set the request either in the node or do the necessary
  * encoding to store in @mas->alloc directly.
+ */
+/*
+ * mas_set_alloc_req() - 设置请求的分配数量。
+ * @mas: maple状态指针。
+ * @count: 请求的分配数量。
+ *
+ * 请求的分配数量可以存储在第一个分配节点中，也可以直接存储在mas结构的alloc字段中，
+ * 具体取决于是否已经有分配节点。如果存在分配节点，该函数将请求数量设置在该节点；
+ * 否则，将通过适当的编码直接在mas结构的alloc字段中设置请求数量。
  */
 static inline void mas_set_alloc_req(struct ma_state *mas, unsigned long count)
 {
@@ -625,6 +730,15 @@ static inline unsigned int mas_alloc_req(const struct ma_state *mas)
  * In the event of a dead node, this array may be %NULL
  *
  * Return: A pointer to the maple node pivots
+ */
+/*
+ * ma_pivots() - 获取枫树pivots的指针。
+ * @node - 枫树节点
+ * @type - 节点类型
+ *
+ * 注意：如果节点处于失效状态，该数组可能为 %NULL。
+ *
+ * 返回：枫树节点枢轴的指针
  */
 static inline unsigned long *ma_pivots(struct maple_node *node,
 					   enum maple_type type)
@@ -701,6 +815,16 @@ static inline unsigned long mas_pivot(struct ma_state *mas, unsigned char piv)
  * Return: The pivot at @piv within the limit of the @pivots array, @mas->max
  * otherwise.
  */
+/*
+ * mas_safe_pivot() - 获取@piv位置或mas->max处的轴点
+ * @mas: maple状态结构体
+ * @pivots: 指向maple节点轴点的指针
+ * @piv: 要获取的轴点索引
+ * @type: maple节点类型
+ *
+ * 返回: 在@pivots数组限制内的@piv位置轴点，否则返回@mas->max处的轴点
+ * 该函数确保所请求的轴点索引位于有效范围内，避免数组越界访问
+ */
 static inline unsigned long
 mas_safe_pivot(const struct ma_state *mas, unsigned long *pivots,
 	       unsigned char piv, enum maple_type type)
@@ -739,6 +863,17 @@ mas_safe_min(struct ma_state *mas, unsigned long *pivots, unsigned char offset)
  * pivot is actually @mas->max.
  *
  * Return: the logical pivot of a given @offset.
+ */
+/*
+ * mas_logical_pivot() - 获取给定偏移量的逻辑轴点。
+ * @mas: Maple 状态结构体。
+ * @pivots: 指向 Maple 节点逻辑轴点的指针。
+ * @offset: 到逻辑轴点数组的偏移量。
+ * @type: Maple 节点类型。
+ *
+ * 当在逻辑轴点数组的末尾之后没有值时，该逻辑轴点实际上是 @mas->max。
+ *
+ * 返回：返回给定 @offset 的逻辑轴点。
  */
 static inline unsigned long
 mas_logical_pivot(struct ma_state *mas, unsigned long *pivots,
@@ -1377,58 +1512,78 @@ static void mas_node_count(struct ma_state *mas, int count)
 }
 
 /*
- * mas_start() - Sets up maple state for operations.
- * @mas: The maple state.
+ * mas_start() - 设置maple状态以进行操作。
+ * @mas: maple状态结构体。
  *
- * If mas->node == MAS_START, then set the min, max and depth to
- * defaults.
+ * 如果 @mas->node 为 MAS_START，则设置 min, max 和 depth 的默认值。
  *
- * Return:
- * - If mas->node is an error or not MAS_START, return NULL.
- * - If it's an empty tree:     NULL & mas->node == MAS_NONE
- * - If it's a single entry:    The entry & mas->node == MAS_ROOT
- * - If it's a tree:            NULL & mas->node == safe root node.
+ * 返回值:
+ * - 如果 @mas->node 处于错误状态或不是 MAS_START，则返回 NULL。
+ * - 如果是空树: 返回 NULL 并且 mas->node 为 MAS_NONE。
+ * - 如果是单个条目: 返回该条目并且 mas->node 为 MAS_ROOT。
+ * - 如果是树结构: 返回 NULL 并且 mas->node 为安全根节点。
+ */
+/**
+ * 开始执行MAS (Maple Acceleration Structure)搜索函数
+ * 此函数旨在准备MAS结构以供后续操作使用，根据MAS的状态初始化搜索参数
+ *
+ * @param mas 指向ma_state结构的指针，表示MAS的状态
+ * @return 返回指向maple_enode结构的指针，表示MAS的根节点，或者在某些条件下返回NULL
  */
 static inline struct maple_enode *mas_start(struct ma_state *mas)
 {
+    // 检查MAS是否已准备好开始操作
 	if (likely(mas_is_start(mas))) {
 		struct maple_enode *root;
 
+		// 初始化MAS的最小和最大值
 		mas->min = 0;
 		mas->max = ULONG_MAX;
 
 retry:
+		// 重置搜索深度
 		mas->depth = 0;
+		// 获取MAS的根节点
 		root = mas_root(mas);
-		/* Tree with nodes */
+		// 如果根节点存在且为树节点
 		if (likely(xa_is_node(root))) {
+			// 更新搜索深度
 			mas->depth = 1;
+			// 设置当前节点为根节点
 			mas->node = mte_safe_root(root);
+			// 重置偏移量
 			mas->offset = 0;
+			// 如果当前节点是死节点，则重新尝试
 			if (mte_dead_node(mas->node))
 				goto retry;
 
+			// 在这种情况下，我们没有找到有效的节点，返回NULL
 			return NULL;
 		}
 
-		/* empty tree */
+		// 如果根节点为空，表示树为空
 		if (unlikely(!root)) {
+			// 设置特殊标记表示树为空
 			mas->node = MAS_NONE;
+			// 设置偏移量
 			mas->offset = MAPLE_NODE_SLOTS;
+			// 返回NULL表示没有找到节点
 			return NULL;
 		}
 
-		/* Single entry tree */
+		// 对单个条目树进行处理
 		mas->node = MAS_ROOT;
 		mas->offset = MAPLE_NODE_SLOTS;
 
-		/* Single entry tree. */
+		// 如果索引大于0，说明不满足条件，返回NULL
 		if (mas->index > 0)
 			return NULL;
 
+		// 返回根节点
 		return root;
 	}
 
+	// 如果条件不满足，返回NULL
 	return NULL;
 }
 
@@ -1928,6 +2083,13 @@ static inline int mab_calc_split(struct ma_state *mas,
 	 * also be located in different parent nodes which are also full.  This can
 	 * carry upwards all the way to the root in the worst case.
 	 */
+	/*
+	* 尽管极其罕见，仍有可能进入所谓的三向分裂场景。
+	* 这种情况是由于一个范围存储操作覆盖了两个完整节点的末尾和开始，
+	* 导致生成的一组条目无法存储在两个节点中。
+	* 有时，这两个节点可能位于不同的父节点中，且这些父节点也是满的。
+	* 在最坏的情况下，这种情况可能一直向上影响到根节点。
+	*/
 	if (unlikely(mab_middle_node(bn, split, slot_count))) {
 		split = b_end / 3;
 		*mid_split = split * 2;
@@ -2929,31 +3091,59 @@ static inline bool mast_overflow(struct maple_subtree_state *mast)
 	return false;
 }
 
+/**
+ * mtree_range_walk - 遍历mtree的指定范围
+ * @mas: ma_state结构的指针，包含遍历状态信息
+ *
+ * 该函数从ma_state结构中提供的节点开始，遍历mtree中的指定范围。
+ * 它根据当前节点的类型和数据结构，调整搜索范围并处理节点。
+ * 如果遇到已删除的节点，函数会重置ma_state并返回NULL。
+ * 否则，函数返回下一个节点的指针。
+ */
 static inline void *mtree_range_walk(struct ma_state *mas)
 {
+	// 用于存储节点轴心点的数组指针
 	unsigned long *pivots;
+	// 用于调整搜索范围的偏移量
 	unsigned char offset;
+	// 当前处理的节点指针
 	struct maple_node *node;
+	// 下一个处理的元素节点指针，及最后一个处理的元素节点指针
 	struct maple_enode *next, *last;
+	// 当前处理的节点类型
 	enum maple_type type;
+	// 节点槽的指针
 	void __rcu **slots;
+	// 用于标记范围的结束偏移量
 	unsigned char end;
+	// 最大和最小轴心点值，用于限定搜索范围
 	unsigned long max, min;
+	// 前一个最大和最小轴心点值，用于调整搜索范围
 	unsigned long prev_max, prev_min;
 
+	// 初始化next和范围变量
 	next = mas->node;
 	min = mas->min;
 	max = mas->max;
 	do {
+		// 重置偏移量，准备处理新节点
 		offset = 0;
+		// 记录上一个处理的节点
 		last = next;
+		// 将下一个处理的元素节点转换为普通节点
 		node = mte_to_node(next);
+		// 获取当前节点的类型
 		type = mte_node_type(next);
+		// 获取节点的轴心点数组
 		pivots = ma_pivots(node, type);
+		// 计算数据结束位置
 		end = ma_data_end(node, type, pivots, max);
+
+		// 如果节点已删除，跳转到dead_node处理
 		if (unlikely(ma_dead_node(node)))
 			goto dead_node;
 
+		// 如果第一个轴心点大于等于索引值，调整范围并跳转到next处理下一个节点
 		if (pivots[offset] >= mas->index) {
 			prev_max = max;
 			prev_min = min;
@@ -2961,32 +3151,42 @@ static inline void *mtree_range_walk(struct ma_state *mas)
 			goto next;
 		}
 
+		// 寻找第一个大于索引值的轴心点
 		do {
 			offset++;
 		} while ((offset < end) && (pivots[offset] < mas->index));
 
+		// 更新最小范围值
 		prev_min = min;
 		min = pivots[offset - 1] + 1;
+		// 更新最大范围值
 		prev_max = max;
 		if (likely(offset < end && pivots[offset]))
 			max = pivots[offset];
 
 next:
+		// 获取节点槽
 		slots = ma_slots(node, type);
+		// 根据偏移量获取下一个处理的元素节点
 		next = mt_slot(mas->tree, slots, offset);
+		// 如果节点已删除，跳转到dead_node处理
 		if (unlikely(ma_dead_node(node)))
 			goto dead_node;
 	} while (!ma_is_leaf(type));
+	// 如果不是叶节点，继续循环
 
+	// 更新ma_state中的状态信息
 	mas->offset = offset;
 	mas->index = min;
 	mas->last = max;
 	mas->min = prev_min;
 	mas->max = prev_max;
 	mas->node = last;
+	// 返回下一个处理的元素节点
 	return (void *)next;
 
 dead_node:
+	// 如果遇到已删除的节点，重置ma_state并返回NULL
 	mas_reset(mas);
 	return NULL;
 }
@@ -3855,17 +4055,31 @@ static inline void mas_extend_spanning_null(struct ma_wr_state *l_wr_mas,
 	}
 }
 
+/**
+ * @brief 遍历内存访问结构的状态。
+ *
+ * 本函数尝试根据内存访问结构的当前状态获取一个指针或遍历一个范围。
+ * 它被设计用于处理不同状态下的结构，并在适当情况下返回相应的入口点或NULL。
+ *
+ * @param mas 指向内存访问结构的指针。
+ * @return 成功时返回指向内存条目的指针，如果结构处于未定义状态或无法处理则返回NULL。
+ */
 static inline void *mas_state_walk(struct ma_state *mas)
 {
 	void *entry;
 
+	// 尝试从内存访问结构的起始位置开始遍历
 	entry = mas_start(mas);
+
+	// 检查结构是否处于未定义状态，如果是则返回NULL
 	if (mas_is_none(mas))
 		return NULL;
 
+	// 如果结构当前指向单个指针，则返回该指针
 	if (mas_is_ptr(mas))
 		return entry;
 
+	// 否则，通过内存树进行范围遍历
 	return mtree_range_walk(mas);
 }
 
@@ -4400,51 +4614,66 @@ static inline void *mas_wr_store_entry(struct ma_wr_state *wr_mas)
  * Return: %NULL or the contents that already exists at the requested index
  * otherwise.  The maple state needs to be checked for error conditions.
  */
+/**
+ * 将一个条目插入到ma_state结构中。
+ *
+ * 该函数负责将新的地址范围条目插入到ma_state结构中，该结构可能代表一个或多个地址范围。
+ * 插入操作可能涉及0、1或2个新掉头（pivots）的插入，具体取决于新范围与现有范围的关系。
+ * 如果新范围正好适合现有空隙、与现有范围相邻或位于空隙内但不接触任何范围，则插入行为会有所不同。
+ *
+ * @param mas 指向ma_state结构的指针，表示地址范围的状态。
+ * @param entry 要插入的新条目，表示一个新的地址范围。
+ *
+ * @return 返回插入操作之前位于插入位置的旧内容（如果有）。
+ *         如果插入操作失败（例如，由于范围冲突），则返回-1，并通过mas结构设置错误代码。
+ */
 static inline void *mas_insert(struct ma_state *mas, void *entry)
 {
+    // 准备写状态，初始化写操作。
 	MA_WR_STATE(wr_mas, mas, entry);
 
 	/*
-	 * Inserting a new range inserts either 0, 1, or 2 pivots within the
-	 * tree.  If the insert fits exactly into an existing gap with a value
-	 * of NULL, then the slot only needs to be written with the new value.
-	 * If the range being inserted is adjacent to another range, then only a
-	 * single pivot needs to be inserted (as well as writing the entry).  If
-	 * the new range is within a gap but does not touch any other ranges,
-	 * then two pivots need to be inserted: the start - 1, and the end.  As
-	 * usual, the entry must be written.  Most operations require a new node
-	 * to be allocated and replace an existing node to ensure RCU safety,
-	 * when in RCU mode.  The exception to requiring a newly allocated node
-	 * is when inserting at the end of a node (appending).  When done
-	 * carefully, appending can reuse the node in place.
-	 */
+		* 插入新的范围可能会在树中插入0、1或2个新的掉头（pivots）。
+		* 如果插入范围与现有空隙完全吻合，则只需将新值写入该位置。
+		* 如果插入范围与现有范围相邻，则只需要插入一个掉头。
+		* 如果新范围位于空隙内但不接触任何其他范围，则需要插入两个掉头：开始-1和结束。
+		* 在大多数情况下，为了确保RCU安全性，需要分配一个新的节点以替换现有节点。
+		* 例外情况是在节点末尾插入（追加），这时可以小心地重用现有的节点。
+		*/
+
+	// 获取要插入范围的开始地址。
 	wr_mas.content = mas_start(mas);
 	if (wr_mas.content)
 		goto exists;
 
+	// 如果mas表示无范围或指针范围，则直接替换根节点。
 	if (mas_is_none(mas) || mas_is_ptr(mas)) {
 		mas_store_root(mas, entry);
 		return NULL;
 	}
 
-	/* spanning writes always overwrite something */
+	// 跨越写入总是会覆盖现有内容。
 	if (!mas_wr_walk(&wr_mas))
 		goto exists;
 
-	/* At this point, we are at the leaf node that needs to be altered. */
+	// 此时，已到达需要修改的叶节点。
 	wr_mas.offset_end = mas->offset;
 	wr_mas.end_piv = wr_mas.r_max;
 
+	// 检查是否有内容冲突。
 	if (wr_mas.content || (mas->last > wr_mas.r_max))
 		goto exists;
 
+	// 如果新条目为空，则直接返回。
 	if (!entry)
 		return NULL;
 
+	// 执行实际的修改操作。
 	mas_wr_modify(&wr_mas);
 	return wr_mas.content;
 
 exists:
+	// 插入失败，设置错误状态。
 	mas_set_err(mas, -EEXIST);
 	return wr_mas.content;
 
@@ -4708,8 +4937,20 @@ no_entry:
  *
  * Return: The entry in the next slot which is possibly NULL
  */
+/**
+ * mas_next_slot - 获取 maple adjacency search (MAS) 的下一个槽位的条目
+ * @mas: MAS 结构的指针
+ * @max: 搜索范围的上限
+ * @empty: 是否允许返回空槽位
+ *
+ * 该函数用于在 maple 树中搜索给定范围内的下一个有效槽位条目。它处理了
+ * 各种情况，包括重新遍历死节点、处理空槽位以及导航到下一个节点。
+ *
+ * 返回: 下一个槽位的条目指针，如果没有找到则返回 NULL。
+ */
 static void *mas_next_slot(struct ma_state *mas, unsigned long max, bool empty)
 {
+	// 槽位指针数组和节点类型等局部变量声明
 	void __rcu **slots;
 	unsigned long *pivots;
 	unsigned long pivot;
@@ -4720,27 +4961,34 @@ static void *mas_next_slot(struct ma_state *mas, unsigned long max, bool empty)
 	void *entry;
 
 retry:
+	// 获取当前节点和节点类型
 	node = mas_mn(mas);
 	type = mte_node_type(mas->node);
 	pivots = ma_pivots(node, type);
 	data_end = ma_data_end(node, type, pivots, mas->max);
+
+	// 如果节点变为死节点，则重新遍历
 	if (unlikely(mas_rewalk_if_dead(mas, node, save_point)))
 		goto retry;
 
 again:
+	// 检查当前节点是否在搜索范围内
 	if (mas->max >= max) {
 		if (likely(mas->offset < data_end))
 			pivot = pivots[mas->offset];
 		else
 			return NULL; /* must be mas->max */
 
+		// 重新遍历以处理死节点
 		if (unlikely(mas_rewalk_if_dead(mas, node, save_point)))
 			goto retry;
 
+		// 如果当前槽位的键大于等于max，返回NULL
 		if (pivot >= max)
 			return NULL;
 	}
 
+	// 更新MAS状态以指向下一个槽位
 	if (likely(mas->offset < data_end)) {
 		mas->index = pivots[mas->offset] + 1;
 		mas->offset++;
@@ -4749,14 +4997,19 @@ again:
 		else
 			mas->last = mas->max;
 	} else  {
+
+	} else {
+		// 如果当前节点没有更多槽位，则尝试导航到下一个节点
 		if (mas_next_node(mas, node, max)) {
 			mas_rewalk(mas, save_point);
 			goto retry;
 		}
 
+		// 如果没有更多节点，则返回NULL
 		if (mas_is_none(mas))
 			return NULL;
 
+		// 重置MAS状态以从下一个节点开始
 		mas->offset = 0;
 		mas->index = mas->min;
 		node = mas_mn(mas);
@@ -4765,11 +5018,15 @@ again:
 		mas->last = pivots[0];
 	}
 
+	// 根据更新后的状态获取槽位条目
 	slots = ma_slots(node, type);
 	entry = mt_slot(mas->tree, slots, mas->offset);
+
+	// 再次检查以处理遍历过程中的节点状态变化
 	if (unlikely(mas_rewalk_if_dead(mas, node, save_point)))
 		goto retry;
 
+	// 如果槽位有有效条目，则返回条目指针
 	if (entry)
 		return entry;
 
@@ -4794,11 +5051,24 @@ again:
  *
  * Return: the next entry or %NULL.
  */
+/**
+ * 获取内存访问结构中的下一个条目地址
+ *
+ * 该函数尝试从给定的内存访问结构 (mas) 中获取下一个条目地址如果最后一个条目地址
+ * 已经超过了指定的限制 (limit)，则返回 NULL，表示没有更多的条目可以访问否则，调用
+ * mas_next_slot 函数来获取下一个有效的条目地址并返回
+ *
+ * @param mas 指向内存访问结构的指针，用于跟踪当前的和最后的条目地址
+ * @param limit 限制地址，作为遍历条目的上界
+ * @return 如果最后一个条目地址小于限制地址，则返回下一个条目地址；否则返回 NULL
+ */
 static inline void *mas_next_entry(struct ma_state *mas, unsigned long limit)
 {
+	// 检查最后一个条目地址是否超过了限制地址
 	if (mas->last >= limit)
 		return NULL;
 
+	// 获取下一个有效的条目地址并返回
 	return mas_next_slot(mas, limit, false);
 }
 
@@ -6178,8 +6448,19 @@ bool mas_nomem(struct ma_state *mas, gfp_t gfp)
 	return true;
 }
 
+/**
+ * 初始化maple树的节点缓存。
+ *
+ * 该函数负责创建一个slab缓存，用于在运行时高效地分配和回收maple树的节点。
+ * maple树是一种用于存储和管理符号的高效数据结构，广泛应用于Linux内核的符号管理中。
+ *
+ * 参数: 无
+ * 返回值: 无
+ */
 void __init maple_tree_init(void)
 {
+    // 创建一个名为"maple_node"的slab缓存，用于存储maple树的节点。
+    // 使用SLAB_PANIC标志确保在内存分配失败时内核会panic，避免系统处于不稳定的态。
 	maple_node_cache = kmem_cache_create("maple_node",
 			sizeof(struct maple_node), sizeof(struct maple_node),
 			SLAB_PANIC, NULL);
@@ -6474,43 +6755,73 @@ EXPORT_SYMBOL(mtree_destroy);
  *
  * Return: The entry at or after the @index or %NULL
  */
+/**
+ * mt_find - 在指定的枫树结构中查找一个条目
+ * @mt: 指向枫树结构的指针
+ * @index: 指向记录当前查找位置的变量的指针
+ * @max: 查找的最大索引值
+ *
+ * 该函数尝试在枫树结构中查找一个非空的条目，从*index指定的位置开始，
+ * 并且不超过max指定的最大索引值。如果找到非空条目，更新*index为查找
+ * 过的最后一个条目之后的位置；如果没有找到，*index保持不变。函数返回
+ * 找到的条目内容的指针，或者NULL（如果所有条目都被扫描完毕或max为0）。
+ *
+ * 注意：这个函数假设调用者持有必要的锁，以保证并发访问的正确性。
+ */
 void *mt_find(struct maple_tree *mt, unsigned long *index, unsigned long max)
 {
+	// 初始化枫树状态结构体，为后续的遍历做准备
 	MA_STATE(mas, mt, *index, *index);
 	void *entry;
+
+	// #ifdef用于条件编译，当CONFIG_DEBUG_MAPLE_TREE定义时启用调试代码
 #ifdef CONFIG_DEBUG_MAPLE_TREE
 	unsigned long copy = *index;
 #endif
 
+	// 调用追踪函数，记录读取操作的开始
 	trace_ma_read(__func__, &mas);
 
+	// 如果索引超出了max指定的范围，直接返回NULL
 	if ((*index) > max)
 		return NULL;
 
+	// 读取锁，保证并发读取的原子性
 	rcu_read_lock();
 retry:
+	// 尝试获取下一个条目
 	entry = mas_state_walk(&mas);
+	// 如果回到了枫树的起始位置，说明没有找到合适的条目，重新尝试
 	if (mas_is_start(&mas))
 		goto retry;
 
+	// 如果遇到空条目，将其指针设置为NULL
 	if (unlikely(xa_is_zero(entry)))
 		entry = NULL;
 
+	// 如果entry非空，跳转到解锁阶段
 	if (entry)
 		goto unlock;
 
+	// 搜索条目，直到达到max指定的索引或找到非空条目
 	while (mas_searchable(&mas) && (mas.last < max)) {
 		entry = mas_next_entry(&mas, max);
+		// 如果找到非空且有效的条目，结束搜索
 		if (likely(entry && !xa_is_zero(entry)))
 			break;
 	}
 
+	// 再次检查条目是否为空
 	if (unlikely(xa_is_zero(entry)))
 		entry = NULL;
+
 unlock:
+	// 解锁，允许其他读取操作
 	rcu_read_unlock();
+	// 如果找到条目，更新索引位置
 	if (likely(entry)) {
 		*index = mas.last + 1;
+		// 调试代码：确保索引值在查找过程中递增
 #ifdef CONFIG_DEBUG_MAPLE_TREE
 		if (MT_WARN_ON(mt, (*index) && ((*index) <= copy)))
 			pr_err("index not increased! %lx <= %lx\n",
@@ -6518,8 +6829,10 @@ unlock:
 #endif
 	}
 
+	// 返回找到的条目内容的指针，或NULL
 	return entry;
 }
+// 使mt_find函数可以被其他模块引用
 EXPORT_SYMBOL(mt_find);
 
 /**
