@@ -24,6 +24,20 @@
  * Note - before using this, please consider if generic version
  * (interval_tree.h) would work for you...
  */
+/*
+ * 模板实现区间树
+ *
+ * ITSTRUCT:   区间树节点的结构体类型
+ * ITRB:       在ITSTRUCT中rb_node结构体字段的名称
+ * ITTYPE:     区间端点的类型
+ * ITSUBTREE:  在ITSTRUCT中保存子树中最后一个端点的ITTYPE字段的名称
+ * ITSTART(n): 返回ITSTRUCT节点n的起始端点
+ * ITLAST(n):  返回ITSTRUCT节点n的最末端点
+ * ITSTATIC:   'static'或空，用于控制内联树定义的静态性
+ * ITPREFIX:   用于内联树定义的前缀
+ *
+ * 注意 - 在使用此模板之前，请考虑通用版本（interval_tree.h）是否适用于您的需求...
+ */
 
 #define INTERVAL_TREE_DEFINE(ITSTRUCT, ITRB, ITTYPE, ITSUBTREE,		      \
 			     ITSTART, ITLAST, ITSTATIC, ITPREFIX)	      \

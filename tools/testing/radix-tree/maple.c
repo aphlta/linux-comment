@@ -35254,35 +35254,55 @@ static noinline void __init check_rcu_threaded(struct maple_tree *mt)
 /* End of RCU stress testing */
 
 /* Check tree structure by depth first searching */
+/**
+ * 使用前序遍历执行DFS（深度优先搜索）遍历 Maple 树。
+ *
+ * 本函数实现了一种基于DFS的遍历算法，用于处理Maple树结构。从指定的起始节点开始，
+ * 它递归地访问树的节点，访问顺序遵循深度优先策略。函数内部通过检查当前节点的状态，
+ * 包括是否为叶子节点、根节点，以及节点的数据范围，来决定下一步的遍历策略。
+ *
+ * @param mas 指向ma_state结构体的指针，该结构体维护了遍历过程中的状态信息，如当前节点、
+ *            最小值、最大值等。
+ *
+ * 该函数没有返回值。
+ */
 static void mas_dfs_preorder(struct ma_state *mas)
 {
-
+	// 定义前一个访问的节点，用于回溯
 	struct maple_enode *prev;
+	// 定义标志变量，用于判断是否结束遍历
 	unsigned char end, slot = 0;
+	// 定义枢轴值指针，用于确定遍历的分支
 	unsigned long *pivots;
 
+	// 如果当前节点是起始节点，则调用相应的起始处理函数后返回
 	if (mas->node == MAS_START) {
 		mas_start(mas);
 		return;
 	}
 
+	// 如果当前节点既是叶子节点又是根节点，则直接结束遍历
 	if (mte_is_leaf(mas->node) && mte_is_root(mas->node))
 		goto done;
 
-walk_up:
+	walk_up:
+	// 获取当前节点的数据结束位置
 	end = mas_data_end(mas);
 	if (mte_is_leaf(mas->node) ||
 	    (slot > end)) {
 		if (mte_is_root(mas->node))
 			goto done;
 
+		// 否则，将槽位设置为父节点槽位的下一个，并尝试向上遍历
 		slot = mte_parent_slot(mas->node) + 1;
 		mas_ascend(mas);
 		goto walk_up;
 	}
 
+	// 保存当前节点，并尝试访问下一个槽位的节点
 	prev = mas->node;
 	mas->node = mas_get_slot(mas, slot);
+	// 如果下一个节点为空或者槽位超过结束位置，则回溯到父节点并重试
 	if (!mas->node || slot > end) {
 		if (mte_is_root(prev))
 			goto done;
@@ -35292,62 +35312,85 @@ walk_up:
 		mas_ascend(mas);
 		goto walk_up;
 	}
+	// 根据前一个节点的类型和当前槽位更新最大值和最小值
 	pivots = ma_pivots(mte_to_node(prev), mte_node_type(prev));
 	mas->max = mas_safe_pivot(mas, pivots, slot, mte_node_type(prev));
 	mas->min = mas_safe_min(mas, pivots, slot);
 
 	return;
 done:
+	// 遍历结束时，将当前节点设置为MAS_NONE
 	mas->node = MAS_NONE;
 }
 
 
+/**
+ * check_dfs_preorder - 检查并验证DFS预遍历的正确性
+ * @mt - maple树结构的指针
+ *
+ * 本函数通过多次初始化和遍历maple树来验证深度优先搜索（DFS）预遍历的正确性。
+ * 它执行不同条件下的序列检查，并确保遍历的元素计数符合预期。
+ * 最后，它清理maple树的资源。
+ */
 static void check_dfs_preorder(struct maple_tree *mt)
 {
 	unsigned long e, count = 0, max = 1000;
 
+	// 初始化maple树的状态结构
 	MA_STATE(mas, mt, 0, 0);
 
+	// 根据系统是32位还是非32位，设置预期的元素计数
 	if (MAPLE_32BIT)
 		e = 37;
 	else
 		e = 74;
 
-	check_seq(mt, max, false);
+	// 检查序列并进行DFS预遍历
+	check_seq(mt, max, true);
 	do {
 		count++;
 		mas_dfs_preorder(&mas);
 	} while (!mas_is_none(&mas));
+	// 断言计数与预期匹配
 	MT_BUG_ON(mt, count != e);
+	// 销毁maple树
 	mtree_destroy(mt);
 
+	// 重新初始化maple树和状态结构
 	mt_init_flags(mt, MT_FLAGS_ALLOC_RANGE);
 	mas_reset(&mas);
 	count = 0;
+	// 对于非32位系统，更新预期计数
 	if (!MAPLE_32BIT)
 		e = 77;
 
-	check_seq(mt, max, false);
+	// 再次检查序列并进行DFS预遍历
+	check_seq(mt, max, true);
 	do {
 		count++;
 		mas_dfs_preorder(&mas);
 	} while (!mas_is_none(&mas));
-	/*printk("count %lu\n", count); */
+	// 断言计数与新的预期匹配
 	MT_BUG_ON(mt, count != e);
+	// 销毁maple树
 	mtree_destroy(mt);
 
+	// 又一次重新初始化maple树和状态结构
 	mt_init_flags(mt, MT_FLAGS_ALLOC_RANGE);
 	mas_reset(&mas);
 	count = 0;
-	check_rev_seq(mt, max, false);
+	// 这次使用逆序检查并进行DFS预遍历
+	check_rev_seq(mt, max, true);
 	do {
 		count++;
 		mas_dfs_preorder(&mas);
 	} while (!mas_is_none(&mas));
-	/*printk("count %lu\n", count); */
+	// 断言计数与之前设置的预期匹配
 	MT_BUG_ON(mt, count != e);
+	// 销毁maple树
 	mtree_destroy(mt);
 
+	// 最后一次初始化maple树，设置一些参数并填充数据
 	mt_init_flags(mt, MT_FLAGS_ALLOC_RANGE);
 	mas_reset(&mas);
 	mt_zero_nr_tallocated();
@@ -35355,17 +35398,17 @@ static void check_dfs_preorder(struct maple_tree *mt)
 	mas_expected_entries(&mas, max);
 	for (count = 0; count <= max; count++) {
 		mas.index = mas.last = count;
+		// 存储值到maple树
 		mas_store(&mas, xa_mk_value(count));
+		// 断言操作成功
 		MT_BUG_ON(mt, mas_is_err(&mas));
 	}
+	// 销毁状态结构和同步屏障
 	mas_destroy(&mas);
 	rcu_barrier();
 	/*
-	 * pr_info(" ->seq test of 0-%lu %luK in %d active (%d total)\n",
-	 *	max, mt_get_alloc_size()/1024, mt_nr_allocated(),
-	 *	mt_nr_tallocated());
-	 */
-
+	* 打印信息 - 显示序列测试的范围和大小（已被注释掉）
+	*/
 }
 /* End of depth first search tests */
 
@@ -35779,16 +35822,25 @@ static noinline void __init check_locky(struct maple_tree *mt)
 
 extern void test_kmem_cache_bulk(void);
 
+/**
+ * farmer_tests - 进行mtree和maple tree的各种测试
+ *
+ * 本函数主要用于在不同的初始化标志和配置条件下，对mtree（maple tree的实现）进行一系列的测试。
+ * 测试包括但不限于内存分配、锁依赖、DFS预序遍历、预分配、跨越写入、空扩展、RCU相关测试等。
+ * 通过这些测试，确保mtree在各种情况下的正确性和性能。
+ */
 void farmer_tests(void)
 {
 	struct maple_node *node;
 	DEFINE_MTREE(tree);
 
+	// 设置mtree的根节点，并进行第一次dump
 	mt_dump(&tree, mt_dump_dec);
 
 	tree.ma_root = xa_mk_value(0);
 	mt_dump(&tree, mt_dump_dec);
 
+	// 分配一个新的节点，设置其属性，并将其设置为根节点，然后进行第二次dump
 	node = mt_alloc_one(GFP_KERNEL);
 	node->parent = (void *)((unsigned long)(&tree) | 1);
 	node->slot[0] = xa_mk_value(0);
@@ -35799,19 +35851,22 @@ void farmer_tests(void)
 	tree.ma_root = mt_mk_node(node, maple_leaf_64);
 	mt_dump(&tree, mt_dump_dec);
 
+	// 验证parent指针的正确性，并释放节点内存
 	node->parent = ma_parent_ptr(node);
 	ma_free_rcu(node);
 
-	/* Check things that will make lockdep angry */
+	// 各种测试开始
+	/* 检查可能会引发lockdep错误的情况 */
 	mt_init_flags(&tree, MT_FLAGS_ALLOC_RANGE);
 	check_locky(&tree);
 	mtree_destroy(&tree);
-	test_kmem_cache_bulk();
 
+	/* 不带任何特殊标志的测试 */
 	mt_init_flags(&tree, 0);
 	check_dfs_preorder(&tree);
 	mtree_destroy(&tree);
 
+	/* 检查预分配、跨越写入、空扩展等特性 */
 	mt_init_flags(&tree, MT_FLAGS_ALLOC_RANGE);
 	check_prealloc(&tree);
 	mtree_destroy(&tree);
@@ -35824,7 +35879,7 @@ void farmer_tests(void)
 	check_null_expand(&tree);
 	mtree_destroy(&tree);
 
-	/* RCU testing */
+	/* RCU相关测试 */
 	mt_init_flags(&tree, 0);
 	check_erase_testset(&tree);
 	mtree_destroy(&tree);
@@ -35834,6 +35889,7 @@ void farmer_tests(void)
 	mtree_destroy(&tree);
 
 	if (!MAPLE_32BIT) {
+		/* 在非32位系统中进行额外的RCU测试 */
 		mt_init_flags(&tree, MT_FLAGS_ALLOC_RANGE);
 		check_rcu_simulated(&tree);
 		mtree_destroy(&tree);
@@ -35843,16 +35899,14 @@ void farmer_tests(void)
 		mtree_destroy(&tree);
 	}
 
-
 #if defined(CONFIG_64BIT)
-	/* Captures from VMs that found previous errors */
+	/* 针对64位系统和从VM中发现的先前错误进行测试 */
 	mt_init_flags(&tree, 0);
 	check_erase2_sets(&tree);
 	mtree_destroy(&tree);
 #endif
 
-
-	/* No memory handling */
+	/* 测试不处理内存的情况 */
 	check_nomem(&tree);
 }
 

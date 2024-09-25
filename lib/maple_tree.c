@@ -3957,20 +3957,52 @@ static bool mas_is_span_wr(struct ma_wr_state *wr_mas)
 	return true;
 }
 
+/**
+ * 函数名：mas_wr_walk_descend
+ * 功能：根据当前节点类型，调整写入器状态，并继续遍历节点。
+ * 参数：
+ *   - wr_mas: 指向写入器状态结构体的指针。
+ * 描述：
+ *   此函数用于在遍历消息传递系统的消息传递描述符时，根据当前的消息传递节点类型，
+ *   更新写入器状态结构体中的类型和槽位信息，并继续遍历下一个节点。
+ *   它首先从当前节点获取类型信息，然后调用mas_wr_node_walk函数遍历下一个节点，
+ *   最后更新写入器状态结构体中的槽位信息。
+ * 注意：此函数是静态内联函数，旨在提高执行效率，应尽量保持其代码简洁。
+ */
 static inline void mas_wr_walk_descend(struct ma_wr_state *wr_mas)
 {
-	wr_mas->type = mte_node_type(wr_mas->mas->node);
-	mas_wr_node_walk(wr_mas);
-	wr_mas->slots = ma_slots(wr_mas->node, wr_mas->type);
+    // 更新写入器状态的类型信息
+    wr_mas->type = mte_node_type(wr_mas->mas->node);
+
+    // 继续遍历下一个节点
+    mas_wr_node_walk(wr_mas);
+
+    // 更新槽位信息
+    wr_mas->slots = ma_slots(wr_mas->node, wr_mas->type);
 }
 
+/**
+ * @brief 配置并初始化写入遍历器状态
+ *
+ * 此函数用于在写入遍历操作开始之前配置遍历器的状态。它通过设置遍历器中的
+ * 各种参数来准备遍历器，使其可以正确地跟踪遍历过程中的最大值、最小值、当前节点
+ * 以及节点深度。这个操作是写入遍历算法的一部分，确保遍历器能够正确地遍历和
+ * 访问树结构。
+ *
+ * @param wr_mas 写入遍历器状态的指针，函数将更新这个状态。
+ */
 static inline void mas_wr_walk_traverse(struct ma_wr_state *wr_mas)
 {
-	wr_mas->mas->max = wr_mas->r_max;
-	wr_mas->mas->min = wr_mas->r_min;
-	wr_mas->mas->node = wr_mas->content;
-	wr_mas->mas->offset = 0;
-	wr_mas->mas->depth++;
+    // 设置当前遍历范围的最大值
+    wr_mas->mas->max = wr_mas->r_max;
+    // 设置当前遍历范围的最小值
+    wr_mas->mas->min = wr_mas->r_min;
+    // 指定当前遍历的起始节点
+    wr_mas->mas->node = wr_mas->content;
+    // 重置遍历的偏移量
+    wr_mas->mas->offset = 0;
+    // 增加遍历的深度计数，表示进入下一级子结构
+    wr_mas->mas->depth++;
 }
 /*
  * mas_wr_walk() - Walk the tree for a write.
@@ -3980,24 +4012,45 @@ static inline void mas_wr_walk_traverse(struct ma_wr_state *wr_mas)
  *
  * Return: True if it's contained in a node, false on spanning write.
  */
+/**
+ * 遍历多级数组结构以查找写位置
+ *
+ * 本函数旨在多级数组结构中找到一个合适的写入位置它通过不断下降
+ * （遍历子数组）和遍历同级数组来移动到正确的节点本函数区分了写操作
+ * 可能的两种情况：当写操作需要在当前层进行时（当数组为叶子节点时），
+ * 和当写操作需要在更低层进行时（当数组为内部节点时）
+ *
+ * @param wr_mas 写操作的状态结构体指针，包含了写操作所需的所有状态信息
+ *
+ * @return 返回一个布尔值，指示是否成功找到写位置如果返回false，
+ *         表示遍历过程中遇到了跨度写操作，该操作不被支持
+ */
 static bool mas_wr_walk(struct ma_wr_state *wr_mas)
 {
-	struct ma_state *mas = wr_mas->mas;
+    // 获取多级数组的状态指针
+    struct ma_state *mas = wr_mas->mas;
 
-	while (true) {
-		mas_wr_walk_descend(wr_mas);
-		if (unlikely(mas_is_span_wr(wr_mas)))
-			return false;
+    // 持续遍历直到找到合适的写入位置
+    while (true) {
+        // 尝试向下遍历到子数组
+        mas_wr_walk_descend(wr_mas);
+        // 如果遇到跨度写操作，返回false跨度写操作不被支持
+        if (unlikely(mas_is_span_wr(wr_mas)))
+            return false;
 
-		wr_mas->content = mas_slot_locked(mas, wr_mas->slots,
-						  mas->offset);
-		if (ma_is_leaf(wr_mas->type))
-			return true;
+        // 获取当前数组槽位的内容，该槽位由当前偏移量指定
+        wr_mas->content = mas_slot_locked(mas, wr_mas->slots,
+                                          mas->offset);
+        // 如果当前数组为叶子节点，则找到写入位置，返回true
+        if (ma_is_leaf(wr_mas->type))
+            return true;
 
-		mas_wr_walk_traverse(wr_mas);
-	}
+        // 否则，继续在同一层级的数组中遍历，寻找写入位置
+        mas_wr_walk_traverse(wr_mas);
+    }
 
-	return true;
+    // 如果遍历成功，返回true
+    return true;
 }
 
 static bool mas_wr_walk_index(struct ma_wr_state *wr_mas)
@@ -6473,30 +6526,51 @@ void __init maple_tree_init(void)
  *
  * Return: the entry or %NULL
  */
+/**
+ * mtree_load - 从映射树中加载条目
+ * @mt: 映射树的指针
+ * @index: 要加载的条目索引
+ *
+ * 该函数尝试从映射树中加载指定索引的条目。它使用read-side RCU锁来确保
+ * 在并发环境下的安全性。函数会考虑多种情况来确定条目是否存在，是否存在
+ * 引用，或者是否需要在映射树中重试查找。
+ *
+ * 返回加载的条目内容，如果没有找到有效的条目则返回NULL。
+ */
 void *mtree_load(struct maple_tree *mt, unsigned long index)
 {
+	// 初始化内存访问状态结构体
 	MA_STATE(mas, mt, index, index);
 	void *entry;
 
+	// 跟踪映射树访问
 	trace_ma_read(__func__, &mas);
+	// 加读锁，用于RCU读操作
 	rcu_read_lock();
-retry:
+	goto retry; // 重新尝试从映射树中查找条目
+
+mas_start:
 	entry = mas_start(&mas);
+	// 如果mas表示无引用状态，则查找失败
 	if (unlikely(mas_is_none(&mas)))
 		goto unlock;
 
+	// 如果mas表示指针状态且索引不为0，则查找失败
 	if (unlikely(mas_is_ptr(&mas))) {
 		if (index)
 			entry = NULL;
-
 		goto unlock;
 	}
 
+	// 在映射树中查找条目
 	entry = mtree_lookup_walk(&mas);
+	// 如果未找到条目且mas表示开始状态，则重试查找
 	if (!entry && unlikely(mas_is_start(&mas)))
 		goto retry;
 unlock:
+	// 解除RCU读锁
 	rcu_read_unlock();
+	// 如果条目是零，则返回NULL
 	if (xa_is_zero(entry))
 		return NULL;
 
@@ -6570,29 +6644,55 @@ EXPORT_SYMBOL(mtree_store);
  * Return: 0 on success, -EEXISTS if the range is occupied, -EINVAL on invalid
  * request, -ENOMEM if memory could not be allocated.
  */
+/**
+ * mtree_insert_range - 在 maple tree 中插入一个范围的键值对
+ * @mt: maple tree 的指针
+ * @first: 插入范围的起始键
+ * @last: 插入范围的结束键
+ * @entry: 要插入的条目
+ * @gfp: 分配内存时使用的标志
+ *
+ * 该函数尝试在 maple tree 中插入一个键值范围。它首先检查提供的条目是否符合插入条件，
+ * 然后检查起始键是否小于或等于结束键。满足条件后，它会锁定 maple tree 以确保插入操作的
+ * 原子性。插入操作可能会因为内存不足而失败，在这种情况下，函数会尝试重新插入。
+ *
+ * 返回值:
+ * - 如果插入成功，返回 0。
+ * - 如果插入失败，返回相应的错误码。
+ */
 int mtree_insert_range(struct maple_tree *mt, unsigned long first,
 		unsigned long last, void *entry, gfp_t gfp)
 {
+	// 初始化状态结构体，用于插入操作
 	MA_STATE(ms, mt, first, last);
 
+	// 检查条目是否已经处于 advanced 状态，如果是，则返回错误
 	if (WARN_ON_ONCE(xa_is_advanced(entry)))
 		return -EINVAL;
 
+	// 如果起始键大于结束键，返回错误
 	if (first > last)
 		return -EINVAL;
 
+	// 锁定 maple tree 以进行插入操作
 	mtree_lock(mt);
+
+	// 尝试插入条目，如果因为内存不足而失败，则重新尝试
 retry:
 	mas_insert(&ms, entry);
 	if (mas_nomem(&ms, gfp))
 		goto retry;
 
+	// 解锁 maple tree
 	mtree_unlock(mt);
+
+	// 检查插入操作是否出错，如果是，则返回错误码
 	if (mas_is_err(&ms))
 		return xa_err(ms.node);
 
 	return 0;
 }
+// 导出该符号，使得其他模块可以访问这个函数
 EXPORT_SYMBOL(mtree_insert_range);
 
 /**
@@ -6605,10 +6705,23 @@ EXPORT_SYMBOL(mtree_insert_range);
  * Return: 0 on success, -EEXISTS if the range is occupied, -EINVAL on invalid
  * request, -ENOMEM if memory could not be allocated.
  */
+/**
+ * 向 maple tree 数据结构中插入一个条目。
+ *
+ * @param mt 指向 maple tree 结构的指针。
+ * @param index 要插入的条目的索引值。
+ * @param entry 指向条目数据的指针。
+ * @param gfp 用于分配内存的 GFP (Get Free Page) 标记。
+ *
+ * @return 插入操作的返回值，通常是一个错误码，0 表示成功插入。
+ *
+ * 本函数通过调用 mtree_insert_range 来实现插入操作，其中起始索引和结束索引相同。
+ */
 int mtree_insert(struct maple_tree *mt, unsigned long index, void *entry,
 		 gfp_t gfp)
 {
-	return mtree_insert_range(mt, index, index, entry, gfp);
+    // 调用 mtree_insert_range 实现插入操作，将单个条目插入到指定索引位置
+    return mtree_insert_range(mt, index, index, entry, gfp);
 }
 EXPORT_SYMBOL(mtree_insert);
 
@@ -7071,33 +7184,68 @@ static void mt_dump_range(unsigned long min, unsigned long max,
 	}
 }
 
+/**
+ * 打印内存条目信息。
+ *
+ * 该函数用于打印给定内存条目的详细信息，包括条目类型（如值、零条目）、范围和格式。
+ * 它首先打印条目所在的地址范围，然后根据条目类型打印相应的信息。
+ *
+ * @param entry 条目指针。可以是指向具体值、零条目或保留条目的指针。
+ * @param min 内存条目范围的起始地址。
+ * @param max 内存条目范围的结束地址。
+ * @param depth 打印的深度信息，可能影响输出的详细程度。
+ * @param format 打印格式类型，决定输出的样式。
+ */
 static void mt_dump_entry(void *entry, unsigned long min, unsigned long max,
 			  unsigned int depth, enum mt_dump_format format)
 {
-	mt_dump_range(min, max, depth, format);
+    // 打印内存条目地址范围
+    mt_dump_range(min, max, depth, format);
 
-	if (xa_is_value(entry))
-		pr_cont("value %ld (0x%lx) [%p]\n", xa_to_value(entry),
-				xa_to_value(entry), entry);
-	else if (xa_is_zero(entry))
-		pr_cont("zero (%ld)\n", xa_to_internal(entry));
-	else if (mt_is_reserved(entry))
-		pr_cont("UNKNOWN ENTRY (%p)\n", entry);
-	else
-		pr_cont("%p\n", entry);
+    // 根据条目类型打印信息
+    if (xa_is_value(entry))
+        pr_cont("value %ld (0x%lx) [%p]\n", xa_to_value(entry),
+                xa_to_value(entry), entry);
+    else if (xa_is_zero(entry))
+        pr_cont("zero (%ld)\n", xa_to_internal(entry));
+    else if (mt_is_reserved(entry))
+        pr_cont("UNKNOWN ENTRY (%p)\n", entry);
+    else
+        pr_cont("%p\n", entry);
 }
 
+/**
+ * 打印 Maple Tree 的 64 位范围节点信息。
+ *
+ * 该函数递归地遍历给定范围内的所有节点或叶，并根据指定的格式打印它们的内容。
+ * 它用于调试和检查 Maple Tree 的结构和数据完整性。
+ *
+ * @param mt 指向 Maple Tree 结构的指针。
+ * @param entry 指向树中的条目。
+ * @param min 查询范围的最小值。
+ * @param max 查询范围的最大值。
+ * @param depth 当前节点在树中的深度。
+ * @param format 打印格式，可以是十六进制或十进制。
+ */
 static void mt_dump_range64(const struct maple_tree *mt, void *entry,
 		unsigned long min, unsigned long max, unsigned int depth,
 		enum mt_dump_format format)
 {
+	// 获取节点指针
 	struct maple_range_64 *node = &mte_to_node(entry)->mr64;
+	// 判断当前条目是否为叶节点
+	// 0000 表示为稠密叶节点，其他值表示为非叶节点
+	// 00
 	bool leaf = mte_is_leaf(entry);
+	// 初始化遍历的起始值为最小查询范围
 	unsigned long first = min;
+	// 用于遍历节点槽
 	int i;
 
+	// 打印节点内容
 	pr_cont(" contents: ");
 	for (i = 0; i < MAPLE_RANGE64_SLOTS - 1; i++) {
+		// 根据格式打印槽和轴心值
 		switch(format) {
 		case mt_dump_hex:
 			pr_cont("%p %lX ", node->slot[i], node->pivot[i]);
@@ -7107,25 +7255,34 @@ static void mt_dump_range64(const struct maple_tree *mt, void *entry,
 			pr_cont("%p %lu ", node->slot[i], node->pivot[i]);
 		}
 	}
+	// 打印最后一个槽
 	pr_cont("%p\n", node->slot[i]);
+	// 遍历所有槽
 	for (i = 0; i < MAPLE_RANGE64_SLOTS; i++) {
+		// 初始化最后一个值为查询范围的最大值
 		unsigned long last = max;
 
 		if (i < (MAPLE_RANGE64_SLOTS - 1))
+			// 如果不是最后一个槽，则将最后一个值设置为当前轴心值
 			last = node->pivot[i];
 		else if (!node->slot[i] && max != mt_node_max(entry))
+			// 如果当前槽为空且最大值不等于节点最大范围，则退出循环
 			break;
+		// 如果最后一个值为0且当前槽不是第一个槽，则退出循环
 		if (last == 0 && i > 0)
 			break;
+		// 如果是叶节点，则打印叶节点内容
 		if (leaf)
 			mt_dump_entry(mt_slot(mt, node->slot, i),
 					first, last, depth + 1, format);
-		else if (node->slot[i])
+		else if (node->slot[i]) // 如果当前槽非空，则递归打印子节点
 			mt_dump_node(mt, mt_slot(mt, node->slot, i),
 					first, last, depth + 1, format);
 
+		// 如果最后一个值等于查询范围的最大值，则退出循环
 		if (last == max)
 			break;
+		// 如果最后一个值大于查询范围的最大值，则记录错误
 		if (last > max) {
 			switch(format) {
 			case mt_dump_hex:
@@ -7138,68 +7295,120 @@ static void mt_dump_range64(const struct maple_tree *mt, void *entry,
 					node, last, max, i);
 			}
 		}
+		// 更新下一个范围的起始值
 		first = last + 1;
 	}
 }
 
+/**
+ * maple_tree的范围转储函数
+ *
+ * 此函数用于将maple树中特定范围(min到max)的节点信息进行转储
+ * 它主要应用于64位的地址范围
+ *
+ * @param mt 指向maple树的指针，用于访问树结构
+ * @param entry 范围起始的条目指针
+ * @param min 转储范围的最小值
+ * @param max 转储范围的最大值
+ * @param depth 当前节点在树中的深度
+ * @param format 转储格式类型
+ */
 static void mt_dump_arange64(const struct maple_tree *mt, void *entry,
 	unsigned long min, unsigned long max, unsigned int depth,
 	enum mt_dump_format format)
 {
+	// 获取当前节点的64位地址范围信息
 	struct maple_arange_64 *node = &mte_to_node(entry)->ma64;
+	// 判断当前条目是否为叶子节点
 	bool leaf = mte_is_leaf(entry);
+	// 初始化范围起始值
 	unsigned long first = min;
+	// 循环变量
 	int i;
 
+	// 打印节点内容的起始信息
 	pr_cont(" contents: ");
+	// 打印节点的间隙数组
 	for (i = 0; i < MAPLE_ARANGE64_SLOTS; i++)
 		pr_cont("%lu ", node->gap[i]);
+	// 打印元数据信息
 	pr_cont("| %02X %02X| ", node->meta.end, node->meta.gap);
+	// 打印槽和轴值
 	for (i = 0; i < MAPLE_ARANGE64_SLOTS - 1; i++)
 		pr_cont("%p %lu ", node->slot[i], node->pivot[i]);
 	pr_cont("%p\n", node->slot[i]);
+	// 遍历槽和轴值，处理每个子范围
 	for (i = 0; i < MAPLE_ARANGE64_SLOTS; i++) {
+		// 初始化子范围的结束值
 		unsigned long last = max;
 
+		// 如果不是最后一个槽，则更新结束值为对应轴值
 		if (i < (MAPLE_ARANGE64_SLOTS - 1))
 			last = node->pivot[i];
+		// 如果当前槽为空，则结束遍历
 		else if (!node->slot[i])
 			break;
+		// 如果结束值为0且不是第一个槽，则结束遍历
 		if (last == 0 && i > 0)
 			break;
+		// 如果是叶子节点，则转储条目信息
 		if (leaf)
 			mt_dump_entry(mt_slot(mt, node->slot, i),
 					first, last, depth + 1, format);
+		// 如果是内部节点，则递归转储子节点信息
 		else if (node->slot[i])
 			mt_dump_node(mt, mt_slot(mt, node->slot, i),
 					first, last, depth + 1, format);
 
+		// 如果结束值等于最大值，则结束遍历
 		if (last == max)
 			break;
+		// 如果结束值大于最大值，则输出错误信息
 		if (last > max) {
 			pr_err("node %p last (%lu) > max (%lu) at pivot %d!\n",
 					node, last, max, i);
 			break;
 		}
+		// 更新下一个子范围的起始值
 		first = last + 1;
 	}
 }
 
+/**
+ * maple_tree的节点转储函数
+ *
+ * 该函数的作用是将maple_tree中的一个特定节点的信息打印出来，用于调试或日志记录
+ * 它可以根据节点的类型，以不同的格式转储节点信息
+ *
+ * @param mt 指向maple_tree的常量指针，表示要转储的树
+ * @param entry 指向maple_tree中节点的入口的指针
+ * @param min 节点键值的最小范围
+ * @param max 节点键值的最大范围
+ * @param depth 节点在树中的深度
+ * @param format 转储信息的格式类型
+ */
 static void mt_dump_node(const struct maple_tree *mt, void *entry,
 		unsigned long min, unsigned long max, unsigned int depth,
 		enum mt_dump_format format)
 {
+	// 将通用入口指针转换为具体的maple_node指针, 最后一个byte FF 是其他信息,不属于指针
 	struct maple_node *node = mte_to_node(entry);
+	// 获取当前节点的类型
+	// 左移三位，得到节点类型
 	unsigned int type = mte_node_type(entry);
 	unsigned int i;
 
+	// 打印节点键值的范围信息
 	mt_dump_range(min, max, depth, format);
 
+	// 打印节点的基本信息：节点指针、深度、类型和父节点指针
 	pr_cont("node %p depth %d type %d parent %p", node, depth, type,
 			node ? node->parent : NULL);
+	// 根据节点类型进行不同的处理
 	switch (type) {
 	case maple_dense:
 		pr_cont("\n");
+		// 遍历密集型节点的所有槽位并打印槽位信息
 		for (i = 0; i < MAPLE_NODE_SLOTS; i++) {
 			if (min + i > max)
 				pr_cont("OUT OF RANGE: ");
@@ -7209,28 +7418,47 @@ static void mt_dump_node(const struct maple_tree *mt, void *entry,
 		break;
 	case maple_leaf_64:
 	case maple_range_64:
+		// 打印64位节点信息
 		mt_dump_range64(mt, entry, min, max, depth, format);
 		break;
 	case maple_arange_64:
+		// 打印64位数组范围节点信息
 		mt_dump_arange64(mt, entry, min, max, depth, format);
 		break;
 
 	default:
+		// 遇到未知节点类型，打印错误信息
 		pr_cont(" UNKNOWN TYPE\n");
 	}
 }
 
+/**
+ * 打印maple_tree的内容。
+ *
+ * 本函数用于将maple_tree的结构和内容以指定的格式打印出来。它首先获取树的根节点，
+ * 然后根据根节点的类型选择适当的递归方式来遍历和打印树的节点。
+ *
+ * @param mt 指向maple_tree结构的指针。不能为空。
+ * @param format 指定打印输出的格式。
+ *
+ * 注意: 本函数依赖于RCU机制来访问maple_tree的内部结构，确保数据访问的安全性。
+ */
 void mt_dump(const struct maple_tree *mt, enum mt_dump_format format)
 {
+	// 获取当前活动的maple_tree根节点的指针。
 	void *entry = rcu_dereference_check(mt->ma_root, mt_locked(mt));
 
+	// 打印maple_tree的基本信息，包括树的指针、标志、高度和根节点指针。
 	pr_info("maple_tree(%p) flags %X, height %u root %p\n",
 		 mt, mt->ma_flags, mt_height(mt), entry);
+	// 如果根节点不是一个节点类型，则调用mt_dump_entry直接打印根节点。
 	if (!xa_is_node(entry))
 		mt_dump_entry(entry, 0, 0, 0, format);
+	// 如果根节点是一个节点类型并且不为空，则调用mt_dump_node打印节点。
 	else if (entry)
 		mt_dump_node(mt, entry, 0, mt_node_max(entry), 0, format);
 }
+// 将mt_dump符号导出，使得其他模块可以使用它。
 EXPORT_SYMBOL_GPL(mt_dump);
 
 /*

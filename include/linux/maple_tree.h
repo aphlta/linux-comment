@@ -191,11 +191,29 @@ struct maple_range_64 {
  *
  * Maple树支持记录此节点中最大的空条目范围，也称为间隙。这优化了树以便于分配一个范围。
  */
+/**
+ * 结构体maple_arange_64定义
+ * 该结构体用于实现 maple 树中的一个节点，该节点能够存储64位的键值对
+ */
 struct maple_arange_64 {
+	// 指向父节点的指针，用于建立树的层级结构
 	struct maple_pnode *parent;
+
+	// 枢纽数组，用于存储部分键值，以优化搜索效率
+	// MAPLE_ARANGE64_SLOTS 定义了节点中存储的键值对的最大数量
+	// 减1是因为剩余一个位置用于存储最大的键值对
 	unsigned long pivot[MAPLE_ARANGE64_SLOTS - 1];
+
+	// RCU (Read-Copy-Update) 保护的槽位数组，用于并发访问控制
+	// 每个槽位指向一个可能被替换的节点或叶子
 	void __rcu *slot[MAPLE_ARANGE64_SLOTS];
+
+	// 间隙数组，用于存储每个槽位之间的键值差距
+	// 这有助于加速查找操作
 	unsigned long gap[MAPLE_ARANGE64_SLOTS];
+
+	// maple 元数据结构，用于存储节点的额外信息
+	// 例如节点的类型、状态等
 	struct maple_metadata meta;
 };
 

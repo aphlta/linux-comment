@@ -635,6 +635,25 @@ struct mm_struct {
 			atomic_t mm_count;
 		} ____cacheline_aligned_in_smp;
 
+		// Maple Tree。这是一种基于范围的B树，并且支持RCU（Read-Copy-Update）机制，专为现代处理器缓存优化而设计。
+
+		// Maple Tree的特点：
+		// RCU安全：Maple Tree支持RCU机制，这意味着读操作不会阻塞写操作，提升了并发性。对于那些需要跟踪非重叠范围的内核子系统，Maple Tree提供了一个简单高效的接口。
+
+		// 分支因子：非叶子节点的分支因子为10，叶子节点的分支因子为16。相比传统的红黑树（rbtree），Maple Tree更短，减少了缓存未命中（cache miss）的可能性。
+
+		// 性能优化：通过移除红黑树节点之间的链表连接，减少了在树结构修改过程中需要加载相邻节点（如VMA节点）的情况，从而减少了缓存未命中。
+
+		// 应用场景：
+		// vm_area_struct：这个补丁集的第一个应用场景是替换 vm_area_struct 中的几个数据结构，包括增强的红黑树、VMA缓存和 mm_struct 中的VMA链表。目标是减少 mmap_lock 的竞争，并最终实现多个任务并发访问 mm_struct。
+		// 设计思路：
+		// Maple Tree的设计基于解决内核中最困难的问题。通过选择B树变体并结合RCU机制，Maple Tree希望在内核中替代那些在性能和复杂性上表现不佳的传统结构。
+
+		// 对比与学术支持：
+		// 补丁的设计理念与学术研究中的一些成果不谋而合，但它独特地使用了范围（range）的概念，区别于传统的B树和RCU B树。这也证明了Maple Tree的设计思路在学术和实际应用中的可行性和前瞻性。
+
+		// 总结：
+		// Maple Tree作为一种新型的内核数据结构，旨在通过减少锁竞争、提高缓存命中率以及支持RCU机制，来优化内核中大量数据的管理，尤其是 vm_area_struct 的管理。随着Maple Tree的引入
 		struct maple_tree mm_mt;
 #ifdef CONFIG_MMU
 		unsigned long (*get_unmapped_area) (struct file *filp,
@@ -961,9 +980,19 @@ struct vma_iterator {
 		},							\
 	}
 
+/**
+ * 初始化vma迭代器结构
+ *
+ * 该函数的目的是对vma_iterator结构进行初始化，以便后续可以遍历给定地址空间内的所有vma（Virtual Memory Area）。
+ *
+ * @param vmi 指向vma_iterator结构的指针，该结构将用于遍历vma。
+ * @param mm 指向mm_struct结构的指针，表示要遍历的地址空间。
+ * @param addr 开始遍历的地址。
+ */
 static inline void vma_iter_init(struct vma_iterator *vmi,
 		struct mm_struct *mm, unsigned long addr)
 {
+	// 调用mas_init函数来初始化vma_iterator中的成员，准备开始vma的遍历
 	mas_init(&vmi->mas, &mm->mm_mt, addr);
 }
 

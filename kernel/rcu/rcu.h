@@ -52,7 +52,37 @@
  *					both the state and the counter of the
  *					grace-period sequence number.
  */
-
+/*
+ * RCU（Read-Copy-Update）机制的管理。
+ *
+ * 该数据结构的最低两位为控制标志，其余位为顺序计数器，用于记录
+ * grace period（宽限期）的序列号。
+ *
+ * 当两个控制标志都为零时，表示没有宽限期正在进行。当任一控制标志
+ * 非零时，表示一个宽限期已经开始且正在进行中。当宽限期完成后，
+ * 控制标志会被重置为0，并且宽限期序列号计数器会加1。
+ *
+ * 然而，一些特定的RCU使用场景会使用自定义的控制值。
+ *
+ * SRCU特殊控制值：
+ *
+ *   SRCU_SNP_INIT_SEQ  :  当SRCU节点初始化时设置的无效/初始值。
+ *
+ *   SRCU_STATE_IDLE    :  没有SRCU的宽限期正在进行
+ *
+ *   SRCU_STATE_SCAN1   :  由rcu_seq_start()设置的状态。指示我们正在扫描
+ *                       被定义为非活跃的槽上的读者（很可能存在待处理的读者
+ *                       将使用该索引，但它们的数量是有限的）。
+ *
+ *   SRCU_STATE_SCAN2   :  通过rcu_seq_set_state()手动设置的状态。指示我们
+ *                       正在翻转读者索引，然后扫描新指定为非活跃槽上的读者
+ *                       （同样，将使用此非活跃索引的待处理读者数量是有限的）。
+ *
+ * RCU轮询GP特殊控制值：
+ *
+ *   RCU_GET_STATE_COMPLETED  :  表示一个已经完成的轮询GP已经完成的状态值。
+ *                           这个值同时涵盖了状态和宽限期序列号的计数器。
+ */
 #define RCU_SEQ_CTR_SHIFT	2
 #define RCU_SEQ_STATE_MASK	((1 << RCU_SEQ_CTR_SHIFT) - 1)
 
@@ -122,6 +152,18 @@ static inline void rcu_seq_end(unsigned long *sp)
  * power of the number of low-order bits reserved for state, then rounded up to
  * the next value in which the state bits are all zero.
  */
+/*
+ * 函数名：rcu_seq_snap
+ * 功能：获取更新方序列号的快照。
+ *
+ * 详细说明：
+ * 此函数返回更新方序列号的最早值，该值能够确保从当前时间算起，已经过去了一个完整的优雅周期。
+ * 一旦优雅周期的序列号达到了这个值，就可以安全地调用所有在此之前注册的回调函数。
+ * 这个值是通过将当前的优雅周期序列号加上状态位预留的低阶位数的2的次方，然后向上取整到下一个状态位全为0的值。
+ *
+ * 参数：无
+ * 返回值：序列号的快照，用于后续的安全回调调用。
+ */
 static inline unsigned long rcu_seq_snap(unsigned long *sp)
 {
 	unsigned long s;
@@ -140,6 +182,14 @@ static inline unsigned long rcu_seq_current(unsigned long *sp)
 /*
  * Given a snapshot from rcu_seq_snap(), determine whether or not the
  * corresponding update-side operation has started.
+ */
+/**
+ * 判断更新操作是否开始
+ *
+ * 利用rcu_seq_snap()获取的快照，判断对应的更新操作是否已经开始。
+ *
+ * @param snap 快照，由rcu_seq_snap()获取。
+ * @return 如果更新操作已经开始，则返回true；否则返回false。
  */
 static inline bool rcu_seq_started(unsigned long *sp, unsigned long s)
 {

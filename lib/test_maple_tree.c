@@ -51,10 +51,23 @@ atomic_t maple_tree_tests_passed;
 #else
 #define cond_resched()			do {} while (0)
 #endif
+/**
+ * 向m-tree插入一个索引和对应的值。
+ *
+ * 本函数是m-tree插入操作的内部实现，专门处理给定索引的插入操作。
+ * 它将索引与一个根据索引计算的值配对后，调用通用的插入函数进行插入。
+ *
+ * @param mt 指向m-tree的指针。
+ * @param index 要插入的索引。
+ * @param gfp 内存分配提示，用于确定在内存分配期间应使用哪种类型的内存压缩。
+ *
+ * @return 插入操作的返回值，可能是0（成功）或相应的错误代码。
+ */
 static int __init mtree_insert_index(struct maple_tree *mt,
 				     unsigned long index, gfp_t gfp)
 {
-	return mtree_insert(mt, index, xa_mk_value(index & LONG_MAX), gfp);
+    /* 调用mtree_insert函数进行实际插入操作，使用index作为key和value */
+    return mtree_insert(mt, index, xa_mk_value(index & LONG_MAX), gfp);
 }
 
 static void __init mtree_erase_index(struct maple_tree *mt, unsigned long index)
@@ -248,28 +261,56 @@ static noinline void __init check_rev_seq(struct maple_tree *mt,
 #endif
 }
 
+/**
+ * check_seq - 验证 maple_tree 的序列插入和加载情况
+ * @mt: 指向 maple_tree 的指针
+ * @max: 要检查的最大序列号
+ * @verbose: 如果为 true，则在检查后打印详细信息
+ *
+ * 此函数主要用于验证从 0 到 @max 的序列号在 maple_tree 中的插入和加载情况。
+ * 它首先确保树为空，然后尝试插入每个序列号，并检查树的状态以确保正确性。
+ * 如果定义了详细模式（@verbose 为 true），它会在检查过程后提供详细的输出。
+ */
 static noinline void __init check_seq(struct maple_tree *mt, unsigned long max,
 		bool verbose)
 {
+	// 用于内部循环的临时变量
 	unsigned long i, j;
 
+	// 确保 maple_tree 不是空树
 	MT_BUG_ON(mt, !mtree_empty(mt));
 
+	// 重置已分配节点数计数器
 	mt_zero_nr_tallocated();
-	for (i = 0; i <= max; i++) {
-		MT_BUG_ON(mt, mtree_insert_index(mt, i, GFP_KERNEL));
-		for (j = 0; j <= i; j++)
-			check_index_load(mt, j);
 
+	// 从 0 到 @max 逐个插入序列号，并检查树的状态
+	for (i = 0; i <= max; i++) {
+		// 尝试插入序列号 @i
+		MT_BUG_ON(mt, mtree_insert_index(mt, i, GFP_KERNEL));
+
+		// 检查从 0 到 @i 所有已插入序列号的加载情况
+		for (j = 0; j <= i; j++) {
+			check_index_load(mt, j);
+		}
+
+
+		// 如果 @i 不为 0，则树的高度不应为 0
 		if (i)
 			MT_BUG_ON(mt, !mt_height(mt));
+
+		// 检查加载情况，预期 @i+1 个节点已加载
 		check_load(mt, i + 1, NULL);
 	}
 
+	// 如果启用了详细模式，则打印相关信息
 #ifndef __KERNEL__
 	if (verbose) {
+		// 确保所有 CPU 都看到一致的状态（用于 RCU）
 		rcu_barrier();
+
+		// 打印树的信息
 		mt_dump(mt, mt_dump_dec);
+		// 打印序列测试的总结信息
 		pr_info(" seq test of 0-%lu %luK in %d active (%d total)\n",
 			max, mt_get_alloc_size()/1024, mt_nr_allocated(),
 			mt_nr_tallocated());

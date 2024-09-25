@@ -1184,30 +1184,95 @@ static struct vm_area_struct *gup_vma_lookup(struct mm_struct *mm,
  * instead of __get_user_pages. __get_user_pages should be used only if
  * you need some special @gup_flags.
  */
+/**
+ * __get_user_pages() - 将用户页面固定在内存中
+ * @mm:		目标mm的mm_struct
+ * @start:	用户地址的起始
+ * @nr_pages:	从起始地址开始固定的页面数
+ * @gup_flags:	修改固定行为的标志
+ * @pages:		接收固定页面指针的数组。
+ *			应该至少有nr_pages长。或者为NULL，如果调用者
+ *			只打算确保页面被故障处理。
+ * @locked:     表示我们是否仍然持有mmap_lock
+ *
+ * 返回固定的页面数（可能少于请求的数量），或错误。关于返回值的详细说明：
+ *
+ * -- 如果nr_pages为0，返回0。
+ * -- 如果nr_pages大于0，但没有页面被固定，返回-errno。
+ * -- 如果nr_pages大于0，并且一些页面被固定，返回被固定的页面数。
+ *    再次强调，这可能少于nr_pages。
+ * -- 0的返回值在需要重新尝试故障时是可能的。
+ *
+ * 调用者负责通过put_page()释放返回的@pages。
+ *
+ * 必须在持有mmap_lock的情况下调用。可能会释放它。请参阅下面的内容。
+ *
+ * __get_user_pages遍历一个进程的页表，并在每个用户地址对应的struct page上取一个引用。
+ * 即，如果用户线程访问给定的用户虚拟地址，它将访问的页面。
+ *
+ * 这不能保证当__get_user_pages返回时，页面存在于用户映射中，甚至在某些情况下
+ * 可能是一个完全不同的页面（例如，如果mmapped pagecache已被无效化并随后重新故障处理）。
+ * 然而，它确实保证页面不会被完全释放。而且，大多数调用者只是关心页面包含的数据
+ * 在某个时间点是有效的。通常，IO或其他类似操作不能保证更强的任何东西，因为锁不能
+ * 在系统调用边界处持有。
+ *
+ * 如果@gup_flags & FOLL_WRITE == 0，则不能写入页面。如果
+ * 页面被写入，在调用put_page之前，必须调用set_page_dirty（或set_page_dirty_lock，视情况而定）。
+ *
+ * 如果设置了FOLL_UNLOCKABLE且没有设置FOLL_NOWAIT，则可能会释放mmap_lock。
+ * 如果发生这种情况，*@locked将在返回时设置为0。
+ *
+ * 因此，使用此类@gup_flags组合的调用者必须仅持有mmap_lock进行读取，并识别何时被释放。
+ * 否则，它必须为读写持有，并且不会释放。
+ *
+ * 在大多数情况下，应该使用get_user_pages或get_user_pages_fast而不是__get_user_pages。
+ * 只有在你需要一些特殊的@gup_flags时才应该使用__get_user_pages。
+ */
+/**
+ * __get_user_pages - 获取用户空间的页面信息
+ * @mm: 目标任务的内存管理结构
+ * @start: 需要获取页面的起始地址
+ * @nr_pages: 需要获取的页面数量
+ * @gup_flags: 操作标志位
+ * @pages: 用于填充页面结构的数组
+ * @locked: 指向一个变量，用于记录页面是否被锁定
+ *
+ * 该函数根据提供的起始地址和页面数量，获取用户空间的页面信息，并将其填充到@pages数组中。
+ * 如果提供了页面数组，相应的页面会被锁定，并在函数执行期间保持锁定状态。
+ * 函数返回成功获取的页面数量，如果发生错误，则返回相应的错误码。
+ */
 static long __get_user_pages(struct mm_struct *mm,
 		unsigned long start, unsigned long nr_pages,
 		unsigned int gup_flags, struct page **pages,
 		int *locked)
 {
+	// 初始化返回值和循环变量
 	long ret = 0, i = 0;
+	// 用于查找和操作页面的VM区域结构
 	struct vm_area_struct *vma = NULL;
+	// 用于跟踪页面映射上下文的结构体
 	struct follow_page_context ctx = { NULL };
 
+	// 如果不需要获取任何页面，则直接返回
 	if (!nr_pages)
 		return 0;
 
+	// 获取未标记的物理地址
 	start = untagged_addr_remote(mm, start);
 
+	// 确保使用逻辑一致性，如果要求获取或锁定页面，则pages数组不能为空
 	VM_BUG_ON(!!pages != !!(gup_flags & (FOLL_GET | FOLL_PIN)));
 
+	// 遍历所有需要获取的页面
 	do {
 		struct page *page;
 		unsigned int foll_flags = gup_flags;
 		unsigned int page_increm;
 
-		/* first iteration or cross vma bound */
+		// 如果当前VM区域无效或已到达当前VM区域的末尾，则查找新的VM区域
 		if (!vma || start >= vma->vm_end) {
 			vma = gup_vma_lookup(mm, start);
+			// 如果在gate区域查找页面
 			if (!vma && in_gate_area(mm, start)) {
 				ret = get_gate_page(mm, start & PAGE_MASK,
 						gup_flags, &vma,
@@ -1218,24 +1283,23 @@ static long __get_user_pages(struct mm_struct *mm,
 				goto next_page;
 			}
 
+			// 如果找不到有效的VM区域，返回错误
 			if (!vma) {
 				ret = -EFAULT;
 				goto out;
 			}
+			// 检查VM区域是否满足操作要求
 			ret = check_vma_flags(vma, gup_flags);
 			if (ret)
 				goto out;
 
+			// 如果是 HugeTLB 页面，特殊处理
 			if (is_vm_hugetlb_page(vma)) {
 				i = follow_hugetlb_page(mm, vma, pages,
 							&start, &nr_pages, i,
 							gup_flags, locked);
+				// 如果没有锁定权限且遇到VM_FAULT_RETRY，必须停止
 				if (!*locked) {
-					/*
-					 * We've got a VM_FAULT_RETRY
-					 * and we've lost mmap_lock.
-					 * We must stop here.
-					 */
 					BUG_ON(gup_flags & FOLL_NOWAIT);
 					goto out;
 				}
@@ -1243,20 +1307,21 @@ static long __get_user_pages(struct mm_struct *mm,
 			}
 		}
 retry:
-		/*
-		 * If we have a pending SIGKILL, don't keep faulting pages and
-		 * potentially allocating memory.
-		 */
+		// 如果有挂起的SIGKILL信号，停止分页和内存分配
 		if (fatal_signal_pending(current)) {
 			ret = -EINTR;
 			goto out;
 		}
+		// 可能进行调度
 		cond_resched();
 
+		// 根据VM区域和标志获取页面
 		page = follow_page_mask(vma, start, foll_flags, &ctx);
+		// 如果页面不存在或链接错误，尝试错误处理
 		if (!page || PTR_ERR(page) == -EMLINK) {
 			ret = faultin_page(vma, start, &foll_flags,
 					   PTR_ERR(page) == -EMLINK, locked);
+			// 根据错误处理结果采取相应措施
 			switch (ret) {
 			case 0:
 				goto retry;
@@ -1271,12 +1336,7 @@ retry:
 			}
 			BUG();
 		} else if (PTR_ERR(page) == -EEXIST) {
-			/*
-			 * Proper page table entry exists, but no corresponding
-			 * struct page. If the caller expects **pages to be
-			 * filled in, bail out now, because that can't be done
-			 * for this page.
-			 */
+			// 如果存在正确的页表项但没有对应的页面结构，且要求填充pages数组，返回错误
 			if (pages) {
 				ret = PTR_ERR(page);
 				goto out;
@@ -1284,9 +1344,11 @@ retry:
 
 			goto next_page;
 		} else if (IS_ERR(page)) {
+			// 如果页面获取出现其他错误，返回错误码
 			ret = PTR_ERR(page);
 			goto out;
 		}
+		// 如果要求填充pages数组，填充页面并执行缓存刷新
 		if (pages) {
 			pages[i] = page;
 			flush_anon_page(vma, page, start);
@@ -1294,6 +1356,7 @@ retry:
 			ctx.page_mask = 0;
 		}
 next_page:
+		// 计算下一次应该增加的页面数量，并更新相关变量
 		page_increm = 1 + (~(start >> PAGE_SHIFT) & ctx.page_mask);
 		if (page_increm > nr_pages)
 			page_increm = nr_pages;
@@ -1302,6 +1365,7 @@ next_page:
 		nr_pages -= page_increm;
 	} while (nr_pages);
 out:
+	// 清理并返回结果
 	if (ctx.pgmap)
 		put_dev_pagemap(ctx.pgmap);
 	return i ? i : ret;
@@ -1601,57 +1665,66 @@ retry:
  * If @locked is non-NULL, it must held for read only and may be
  * released.  If it's released, *@locked will be set to 0.
  */
+/**
+ * populate_vma_page_range - 为给定VMA范围内的页面执行操作，如触碰或锁定
+ * @vma: 指向vm_area_struct的指针，表示VMA
+ * @start: 操作开始的物理地址
+ * @end: 操作结束的物理地址
+ * @locked: 输出参数，指示操作期间页面是否被锁定
+ *
+ * 此函数确保从@start到@end地址范围内的所有页面都属于给定的VMA(@vma)，
+ * 并根据VMA的标志对这些页面执行相应操作，如触碰(page被访问)或尝试锁定。
+ * 如果@locked非空，它将指示是否成功锁定页面。
+ *
+ * 返回值: 返回成功处理的页面数。如果返回值小于预期的页面数(nr_pages)，
+ * 表示有些页面无法访问(例如，由于权限问题)。
+ */
 long populate_vma_page_range(struct vm_area_struct *vma,
 		unsigned long start, unsigned long end, int *locked)
 {
+	// 获取进程的内存管理结构
 	struct mm_struct *mm = vma->vm_mm;
+	// 计算范围内的页面数量
 	unsigned long nr_pages = (end - start) / PAGE_SIZE;
 	int local_locked = 1;
 	int gup_flags;
 	long ret;
 
+	// 确保起始和结束地址是页面对齐的
 	VM_BUG_ON(!PAGE_ALIGNED(start));
 	VM_BUG_ON(!PAGE_ALIGNED(end));
+	// 确保给定的地址范围在VMA范围内
 	VM_BUG_ON_VMA(start < vma->vm_start, vma);
 	VM_BUG_ON_VMA(end   > vma->vm_end, vma);
+	// 确保mm_struct的锁已上锁
 	mmap_assert_locked(mm);
 
-	/*
-	 * Rightly or wrongly, the VM_LOCKONFAULT case has never used
-	 * faultin_page() to break COW, so it has no work to do here.
-	 */
+	// 对于VM_LOCKONFAULT标志，不执行任何操作，直接返回页面数
 	if (vma->vm_flags & VM_LOCKONFAULT)
 		return nr_pages;
 
+	// 设置默认的页面操作标志
 	gup_flags = FOLL_TOUCH;
-	/*
-	 * We want to touch writable mappings with a write fault in order
-	 * to break COW, except for shared mappings because these don't COW
-	 * and we would not want to dirty them for nothing.
-	 */
+
+	// 如果VMA是可写但非共享的，设置写操作标志以打破COW
 	if ((vma->vm_flags & (VM_WRITE | VM_SHARED)) == VM_WRITE)
 		gup_flags |= FOLL_WRITE;
 
-	/*
-	 * We want mlock to succeed for regions that have any permissions
-	 * other than PROT_NONE.
-	 */
+	// 对于可访问的VMA，设置强制操作标志，确保mlock能成功
 	if (vma_is_accessible(vma))
 		gup_flags |= FOLL_FORCE;
 
+	// 如果提供了locked参数，设置相应的标志
 	if (locked)
 		gup_flags |= FOLL_UNLOCKABLE;
 
-	/*
-	 * We made sure addr is within a VMA, so the following will
-	 * not result in a stack expansion that recurses back here.
-	 */
+	// 执行页面操作
 	ret = __get_user_pages(mm, start, nr_pages, gup_flags,
 			       NULL, locked ? locked : &local_locked);
+	// 操作后进行LRU缓存调整
 	lru_add_drain();
 	return ret;
 }
-
 /*
  * faultin_vma_page_range() - populate (prefault) page tables inside the
  *			      given VMA range readable/writable
@@ -1717,55 +1790,69 @@ long faultin_vma_page_range(struct vm_area_struct *vma, unsigned long start,
  * flags. VMAs must be already marked with the desired vm_flags, and
  * mmap_lock must not be held.
  */
+/**
+ * __mm_populate函数用于填充当前进程地址空间中的页面。
+ *
+ * 该函数尝试将指定地址范围内的所有页面标记为在内存中存在，即使它们之前可能被标记为需要从磁盘交换。
+ * 这对于确保给定地址范围内的所有页面都已加载并准备好访问特别有用，可以避免在以后访问这些页面时产生缺页异常。
+ *
+ * @param start 填充页面的起始地址。
+ * @param len   需要填充页面的长度。
+ * @param ignore_errors 当遇到错误时，如果设置为非0，则忽略错误并继续处理；如果为0，则在第一个错误处停止并返回错误码。
+ *
+ * @return 该函数返回0表示成功，或者返回负的错误码。如果ignore_errors参数为非0，遇到错误时会继续处理，不返回错误码。
+ */
 int __mm_populate(unsigned long start, unsigned long len, int ignore_errors)
 {
+	// 获取当前进程的mm_struct结构体指针
 	struct mm_struct *mm = current->mm;
 	unsigned long end, nstart, nend;
-	struct vm_area_struct *vma = NULL;
-	int locked = 0;
-	long ret = 0;
+	struct vm_area_struct *vma = NULL; // 初始化vma为NULL
+	int locked = 0; // 用于指示是否已锁定mm_struct
+	long ret = 0; // 函数返回值，初始化为0
 
+	// 计算填充页面的结束地址
 	end = start + len;
 
+	// 遍历指定的地址范围，尝试填充每个页面
 	for (nstart = start; nstart < end; nstart = nend) {
-		/*
-		 * We want to fault in pages for [nstart; end) address range.
-		 * Find first corresponding VMA.
-		 */
+		// 如果没有锁定mm_struct，则锁定它
 		if (!locked) {
 			locked = 1;
 			mmap_read_lock(mm);
+			// 查找与指定地址范围相交的第一个VMA
 			vma = find_vma_intersection(mm, nstart, end);
 		} else if (nstart >= vma->vm_end)
+			// 如果当前地址超出当前VMA的结束地址，查找下一个VMA
 			vma = find_vma_intersection(mm, vma->vm_end, end);
 
+		// 如果没有找到VMA，结束循环
 		if (!vma)
 			break;
-		/*
-		 * Set [nstart; nend) to intersection of desired address
-		 * range with the first VMA. Also, skip undesirable VMA types.
-		 */
+
+		// 确定本次操作的结束地址，并跳过不需要填充的VMA类型
 		nend = min(end, vma->vm_end);
 		if (vma->vm_flags & (VM_IO | VM_PFNMAP))
 			continue;
 		if (nstart < vma->vm_start)
 			nstart = vma->vm_start;
-		/*
-		 * Now fault in a range of pages. populate_vma_page_range()
-		 * double checks the vma flags, so that it won't mlock pages
-		 * if the vma was already munlocked.
-		 */
+
+		// 尝试填充VMA中的页面
 		ret = populate_vma_page_range(vma, nstart, nend, &locked);
 		if (ret < 0) {
+			// 如果遇到错误，根据ignore_errors参数决定是忽略错误还是停止操作
 			if (ignore_errors) {
 				ret = 0;
 				continue;	/* continue at next VMA */
 			}
 			break;
 		}
+		// 更新地址范围，并重置ret为0以准备下一次迭代
 		nend = nstart + ret * PAGE_SIZE;
 		ret = 0;
 	}
+
+	// 如果mm_struct被锁定，则解锁
 	if (locked)
 		mmap_read_unlock(mm);
 	return ret;	/* 0 or negative error code */

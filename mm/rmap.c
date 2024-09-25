@@ -185,6 +185,25 @@ static void anon_vma_chain_link(struct vm_area_struct *vma,
  *
  * This must be called with the mmap_lock held for reading.
  */
+/**
+ * __anon_vma_prepare - 为一个内存区域附加anon_vma
+ * @vma: 需要处理的内存区域
+ *
+ * 该函数确保由'vma'描述的内存映射具有一个附加的'anon_vma'，
+ * 这样我们可以将映射到其中的匿名页面与该anon_vma关联起来。
+ *
+ * 通常情况下，我们已经有一个anon_vma，这种情况在anon_vma_prepare()中通过内联函数处理。
+ * 但如果不存在，我们需要找到一个可以重用anon_vma的相邻映射（当vma分割的唯一原因是mprotect()时，这种情况很常见），
+ * 或者我们分配一个新的anon_vma。
+ *
+ * Anon-vma分配非常微妙，因为在folio_lock_anon_vma_read()中，我们可能已经乐观地查找了一个anon_vma，
+ * 并且这实际上可能会触及新分配的vma的rwsem（这依赖于RCU以确保anon_vma实际上不会被销毁）。
+ *
+ * 因此，即使对于新分配，我们也需要进行正确的anon_vma锁定。同时，对于已经拥有anon_vma的常见情况，
+ * 我们不希望进行任何锁定。
+ *
+ * 调用此函数时，需要持有mmap_lock进行读取。
+ */
 int __anon_vma_prepare(struct vm_area_struct *vma)
 {
 	struct mm_struct *mm = vma->vm_mm;

@@ -187,27 +187,41 @@ static int check_brk_limits(unsigned long addr, unsigned long len)
 }
 static int do_brk_flags(struct vma_iterator *vmi, struct vm_area_struct *brkvma,
 		unsigned long addr, unsigned long request, unsigned long flags);
+/**
+ * brk系统调用的实现函数。
+ *
+ * @param brk 用户空间请求的新数据段边界。
+ * @return 返回新的数据段边界地址，出错时返回错误码。
+ *
+ * 此函数实现了brk系统调用，用于动态地改变进程的数据段大小。
+ * 它会根据传入的参数brk与当前进程的数据段边界进行比较，并进行相应的调整。
+ */
 SYSCALL_DEFINE1(brk, unsigned long, brk)
 {
+	// 定义新的数据段边界、旧的数据段边界和原始数据段边界
 	unsigned long newbrk, oldbrk, origbrk;
+	// 获取当前进程的内存管理结构
 	struct mm_struct *mm = current->mm;
+	// 定义当前进程虚拟内存区域结构指针，用于遍历和查找
 	struct vm_area_struct *brkvma, *next = NULL;
+	// 定义最小数据段边界
 	unsigned long min_brk;
+	// 标记是否需要填充新分配的区域
 	bool populate = false;
+	// 定义一个链表用于处理用户错误映射
 	LIST_HEAD(uf);
+	// 定义一个虚拟内存区域迭代器
 	struct vma_iterator vmi;
 
+	// 尝试获取写锁，如果因为信号中断而失败则返回-EINTR
 	if (mmap_write_lock_killable(mm))
 		return -EINTR;
 
+	// 保存原始的数据段边界
 	origbrk = mm->brk;
 
+	// 根据配置和随机化设置决定最小数据段边界
 #ifdef CONFIG_COMPAT_BRK
-	/*
-	 * CONFIG_COMPAT_BRK can still be overridden by setting
-	 * randomize_va_space to 2, which will still cause mm->start_brk
-	 * to be arbitrarily shifted
-	 */
 	if (current->brk_randomized)
 		min_brk = mm->start_brk;
 	else
@@ -215,6 +229,7 @@ SYSCALL_DEFINE1(brk, unsigned long, brk)
 #else
 	min_brk = mm->start_brk;
 #endif
+	// 如果请求的新边界小于最小边界则直接退出
 	if (brk < min_brk)
 		goto out;
 
@@ -228,64 +243,73 @@ SYSCALL_DEFINE1(brk, unsigned long, brk)
 			      mm->end_data, mm->start_data))
 		goto out;
 
+	// 对请求的边界进行页对齐
 	newbrk = PAGE_ALIGN(brk);
+	// 对当前的数据段边界进行页对齐
 	oldbrk = PAGE_ALIGN(mm->brk);
+	// 如果新旧边界对齐后相同，则直接更新数据段边界并成功退出
 	if (oldbrk == newbrk) {
 		mm->brk = brk;
 		goto success;
 	}
 
-	/* Always allow shrinking brk. */
+	// 如果请求缩小数据段，进行相应的处理
 	if (brk <= mm->brk) {
-		/* Search one past newbrk */
+		// 初始化迭代器
 		vma_iter_init(&vmi, mm, newbrk);
+		// 查找旧边界对应的VMA
 		brkvma = vma_find(&vmi, oldbrk);
+		// 如果找不到或VMA的起始地址大于等于旧边界，则退出
 		if (!brkvma || brkvma->vm_start >= oldbrk)
 			goto out; /* mapping intersects with an existing non-brk vma. */
-		/*
-		 * mm->brk must be protected by write mmap_lock.
-		 * do_vma_munmap() will drop the lock on success,  so update it
-		 * before calling do_vma_munmap().
-		 */
+		// 更新数据段边界
 		mm->brk = brk;
+		// 尝试解除映射，如果失败则退出
 		if (do_vma_munmap(&vmi, brkvma, newbrk, oldbrk, &uf, true))
 			goto out;
 
 		goto success_unlocked;
 	}
 
+	// 检查数据段扩展的限制，如果超出限制则退出
 	if (check_brk_limits(oldbrk, newbrk - oldbrk))
 		goto out;
 
-	/*
-	 * Only check if the next VMA is within the stack_guard_gap of the
-	 * expansion area
-	 */
+	// 检查扩展区域是否与下一个VMA冲突
 	vma_iter_init(&vmi, mm, oldbrk);
 	next = vma_find(&vmi, newbrk + PAGE_SIZE + stack_guard_gap);
 	if (next && newbrk + PAGE_SIZE > vm_start_gap(next))
 		goto out;
 
+	// 找到数据段起始之前的VMA
 	brkvma = vma_prev_limit(&vmi, mm->start_brk);
-	/* Ok, looks good - let it rip. */
+	// 尝试扩展数据段
 	if (do_brk_flags(&vmi, brkvma, oldbrk, newbrk - oldbrk, 0) < 0)
 		goto out;
 
+	// 更新数据段边界
 	mm->brk = brk;
+	// 如果默认标志包含VM_LOCKED，则需要填充新分配的区域
 	if (mm->def_flags & VM_LOCKED)
 		populate = true;
 
 success:
+	// 解锁写操作
 	mmap_write_unlock(mm);
 success_unlocked:
+	// 处理用户错误映射
 	userfaultfd_unmap_complete(mm, &uf);
+	// 如果需要填充，则填充新分配的区域
 	if (populate)
 		mm_populate(oldbrk, newbrk - oldbrk);
+	// 返回新的数据段边界
 	return brk;
 
 out:
+	// 失败时恢复原始数据段边界并解锁
 	mm->brk = origbrk;
 	mmap_write_unlock(mm);
+	// 返回原始数据段边界作为错误处理
 	return origbrk;
 }
 
@@ -1858,11 +1882,26 @@ EXPORT_SYMBOL(find_vma_intersection);
  * Returns: The VMA associated with addr, or the next VMA.
  * May return %NULL in the case of no VMA at addr or above.
  */
+/**
+ * find_vma - 在指定的地址空间中查找对应的虚拟内存区域
+ * @mm: 指向目标地址空间的指针
+ * @addr: 待查找的虚拟地址
+ *
+ * 该函数用于在给定的地址空间（@mm）中，查找包含指定虚拟地址（@addr）的虚拟内存区域（vma）。
+ * 它首先断言 mmap 锁已锁定，以确保在操作过程中数据的一致性。然后，利用 index 作为地址偏移，
+ * 调用 mt_find 函数在地址空间中进行查找。ULONG_MAX 参数表明搜索范围可以从指定地址开始直到地址空间的上限。
+ *
+ * 返回值：
+ * 如果找到对应的 vma，返回指向该 vma 的指针；否则返回 NULL。
+ */
 struct vm_area_struct *find_vma(struct mm_struct *mm, unsigned long addr)
 {
 	unsigned long index = addr;
 
+	/* 确保 mmap 锁已锁定，以保证数据访问的正确性 */
 	mmap_assert_locked(mm);
+
+	/* 在地址空间中查找包含指定地址的 vma */
 	return mt_find(&mm->mm_mt, &index, ULONG_MAX);
 }
 EXPORT_SYMBOL(find_vma);
@@ -3044,80 +3083,101 @@ int do_vma_munmap(struct vma_iterator *vmi, struct vm_area_struct *vma,
  * do not match then create a new anonymous VMA.  Eventually we may be able to
  * do some brk-specific accounting here.
  */
+/*
+ * 分配或扩展内存区域
+ * 
+ * 该函数尝试根据给定的标志（flags）在当前进程的地址空间中分配或扩展一个内存区域。
+ * 它会检查地址空间的限制，更新虚拟内存区域（vma）的配置，并确保操作的安全性与合规性。
+ * 
+ * 参数:
+ * vmi - 虚拟内存区域迭代器
+ * vma - 指向当前虚拟内存区域的结构体
+ * addr - 尝试分配或扩展的起始地址
+ * len - 分配或扩展的长度
+ * flags - 用于分配或扩展内存的标志
+ * 
+ * 返回:
+ * 成功时返回0，失败时返回相应的错误码（例如ENOMEM表示内存不足）。
+ */
 static int do_brk_flags(struct vma_iterator *vmi, struct vm_area_struct *vma,
 		unsigned long addr, unsigned long len, unsigned long flags)
 {
 	struct mm_struct *mm = current->mm;
 	struct vma_prepare vp;
 
+	// 验证当前进程的内存管理结构是否有效
 	validate_mm(mm);
+
 	/*
-	 * Check against address space limits by the changed size
-	 * Note: This happens *after* clearing old mappings in some code paths.
+	 * 通过更改的大小检查地址空间限制
+	 * 注意：在某些代码路径中，这发生在清除旧映射之后。
 	 */
-	flags |= VM_DATA_DEFAULT_FLAGS | VM_ACCOUNT | mm->def_flags;
-	if (!may_expand_vm(mm, flags, len >> PAGE_SHIFT))
+	flags |= VM_DATA_DEFAULT_FLAGS | VM_ACCOUNT | mm->def_flags; // 设置默认的VMA标志
+	if (!may_expand_vm(mm, flags, len >> PAGE_SHIFT)) // 检查是否可以扩展虚拟内存
 		return -ENOMEM;
 
+	// 检查映射计数是否超过系统限制
 	if (mm->map_count > sysctl_max_map_count)
 		return -ENOMEM;
 
+	// 安全性检查：是否有足够的内存
 	if (security_vm_enough_memory_mm(mm, len >> PAGE_SHIFT))
 		return -ENOMEM;
 
 	/*
-	 * Expand the existing vma if possible; Note that singular lists do not
-	 * occur after forking, so the expand will only happen on new VMAs.
+	 * 如果可能，扩展现有的vma；注意，分叉后不会发生单例列表，
+	 * 所以扩展只会在新的VMA上发生。
 	 */
 	if (vma && vma->vm_end == addr && !vma_policy(vma) &&
 	    can_vma_merge_after(vma, flags, NULL, NULL,
 				addr >> PAGE_SHIFT, NULL_VM_UFFD_CTX, NULL)) {
-		if (vma_iter_prealloc(vmi))
+		if (vma_iter_prealloc(vmi)) // 检查vma迭代器是否预分配
 			goto unacct_fail;
 
-		init_vma_prep(&vp, vma);
-		vma_prepare(&vp);
-		vma_adjust_trans_huge(vma, vma->vm_start, addr + len, 0);
-		vma->vm_end = addr + len;
-		vm_flags_set(vma, VM_SOFTDIRTY);
-		vma_iter_store(vmi, vma);
+		init_vma_prep(&vp, vma); // 初始化vma准备结构
+		vma_prepare(&vp); // 准备vma
+		vma_adjust_trans_huge(vma, vma->vm_start, addr + len, 0); // 调整vma以处理巨大的页面
+		vma->vm_end = addr + len; // 更新vma结束地址
+		vm_flags_set(vma, VM_SOFTDIRTY); // 设置vma标志
+		vma_iter_store(vmi, vma); // 存储vma到迭代器
 
-		vma_complete(&vp, vmi, mm);
-		khugepaged_enter_vma(vma, flags);
-		goto out;
+		vma_complete(&vp, vmi, mm); // 完成vma操作
+		khugepaged_enter_vma(vma, flags); // 通知khugepaged关于vma的变化
+		goto out; // 跳到结束流程
 	}
 
-	/* create a vma struct for an anonymous mapping */
+	// 为匿名映射创建一个新的vma结构
 	vma = vm_area_alloc(mm);
 	if (!vma)
 		goto unacct_fail;
 
-	vma_set_anonymous(vma);
-	vma->vm_start = addr;
-	vma->vm_end = addr + len;
-	vma->vm_pgoff = addr >> PAGE_SHIFT;
-	vm_flags_init(vma, flags);
-	vma->vm_page_prot = vm_get_page_prot(flags);
-	if (vma_iter_store_gfp(vmi, vma, GFP_KERNEL))
+	vma_set_anonymous(vma); // 设置vma为匿名
+	vma->vm_start = addr; // 设置vma起始地址
+	vma->vm_end = addr + len; // 设置vma结束地址
+	vma->vm_pgoff = addr >> PAGE_SHIFT; // 设置vma的页偏移
+	vm_flags_init(vma, flags); // 初始化vma的标志
+	vma->vm_page_prot = vm_get_page_prot(flags); // 获取vma的页保护
+	if (vma_iter_store_gfp(vmi, vma, GFP_KERNEL)) // 将vma存储到迭代器
 		goto mas_store_fail;
 
-	mm->map_count++;
-	ksm_add_vma(vma);
-out:
-	perf_event_mmap(vma);
-	mm->total_vm += len >> PAGE_SHIFT;
-	mm->data_vm += len >> PAGE_SHIFT;
-	if (flags & VM_LOCKED)
-		mm->locked_vm += (len >> PAGE_SHIFT);
-	vm_flags_set(vma, VM_SOFTDIRTY);
-	validate_mm(mm);
+	mm->map_count++; // 增加映射计数
+	ksm_add_vma(vma); // 添加vma到KSM（如果适用）
+
+out: // 结束流程
+	perf_event_mmap(vma); // 处理性能事件
+	mm->total_vm += len >> PAGE_SHIFT; // 更新总虚拟内存大小
+	mm->data_vm += len >> PAGE_SHIFT; // 更新数据段使用的虚拟内存大小
+	if (flags & VM_LOCKED) // 如果内存锁定
+		mm->locked_vm += (len >> PAGE_SHIFT); // 更新锁定的虚拟内存大小
+	vm_flags_set(vma, VM_SOFTDIRTY); // 设置vma标志
+	validate_mm(mm); // 验证mm结构
 	return 0;
 
-mas_store_fail:
-	vm_area_free(vma);
-unacct_fail:
-	vm_unacct_memory(len >> PAGE_SHIFT);
-	return -ENOMEM;
+mas_store_fail: // vma存储失败
+	vm_area_free(vma); // 释放vma
+unacct_fail: // 未成功分配或扩展内存区域
+	vm_unacct_memory(len >> PAGE_SHIFT); // 取消会计内存
+	return -ENOMEM; // 返回内存不足错误
 }
 
 int vm_brk_flags(unsigned long addr, unsigned long request, unsigned long flags)

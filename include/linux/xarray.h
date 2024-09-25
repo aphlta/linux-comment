@@ -166,8 +166,18 @@ static inline unsigned long xa_to_internal(const void *entry)
  * Context: Any context.
  * Return: %true if the entry is an internal entry.
  */
+/**
+ * 判断一个给定的内存地址是否指向内部代码
+ *
+ * @param entry 指向一个内存地址的指针
+ * @return 如果内存地址指向内部代码，返回true；否则返回false
+ *
+ * 通过检查给定地址的最低两位，确定其是否为内部代码的地址
+ * 内部代码地址的最低两位必须为2，才能确保地址是32位对齐的
+ */
 static inline bool xa_is_internal(const void *entry)
 {
+    // 通过位运算检查地址的最低两位是否为2，从而判断是否为内部代码地址
 	return ((unsigned long)entry & 3) == 2;
 }
 
@@ -1237,9 +1247,23 @@ static inline struct xa_node *xa_to_node(const void *entry)
 }
 
 /* Private */
+/**
+ * 判断给定的条目是否为节点条目
+ *
+ * 在某些数据结构中，如扩展数组（eXtended Array，简称XA），条目可以分为内部条目和节点条目
+ * 内部条目用于存储数据结构的内部信息，而节点条目则用于存储用户数据
+ * 该函数通过检查条目的类型以及其值来判断它是否为节点条目
+ *
+ * @param entry 指向待检查条目的指针
+ * @return 如果条目是节点条目，则返回true；否则返回false
+ *
+ * 该函数首先调用xa_is_internal来检查条目是否为内部条目
+ * 如果是内部条目，再通过比较条目地址的值与4096的大小来进一步判断是否为节点条目
+ * 这里的4096是一个预设的阈值，用于区分不同的条目类型
+ */
 static inline bool xa_is_node(const void *entry)
 {
-	return xa_is_internal(entry) && (unsigned long)entry > 4096;
+    return xa_is_internal(entry) && (unsigned long)entry > 4096;
 }
 
 /* Private */

@@ -3119,6 +3119,18 @@ struct anon_vma_chain *anon_vma_interval_tree_iter_next(
 void anon_vma_interval_tree_verify(struct anon_vma_chain *node);
 #endif
 
+/**
+ * 定义了一个用于遍历匿名VMA区间树的宏
+ *
+ * @param avc 区间树的迭代器，用于遍历和访问区间树的元素
+ * @param root 区间树的根节点指针，标识区间树的起始点
+ * @param start 遍历的起始地址，定义了遍历的下界
+ * @param last 遍历的结束地址，定义了遍历的上界
+ *
+ * 该宏通过一个循环结构，使用两个辅助函数`anon_vma_interval_tree_iter_first`和
+ * `anon_vma_interval_tree_iter_next`来初始化迭代器`avc`并遍历区间树中的元素。
+ * 循环会从指定的起始地址和结束地址之间遍历区间树的所有元素，直到没有更多的元素可遍历时结束循环。
+ */
 #define anon_vma_interval_tree_foreach(avc, root, start, last)		 \
 	for (avc = anon_vma_interval_tree_iter_first(root, start, last); \
 	     avc; avc = anon_vma_interval_tree_iter_next(avc, start, last))

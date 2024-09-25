@@ -108,16 +108,33 @@ static inline void mmap_write_lock_nested(struct mm_struct *mm, int subclass)
 	__mmap_lock_trace_acquire_returned(mm, true, true);
 }
 
+/**
+ * 对mmap_lock进行写锁，当有更高优先级的进程需要访问时，当前进程可以被中断并杀死。
+ *
+ * 此函数用于在内存映射锁上获取写锁，允许在持有锁期间进行读操作，但防止任何其他进程
+ * 同时获取写锁，直到此函数释放锁为止。如果在尝试获取锁时有更高优先级的进程也需要访问，
+ * 当前进程将被标记为可中断，并且可以被系统杀死以优先满足高优先级进程的需求。
+ *
+ * @param mm 指向mm_struct的指针，表示内存的地址空间。
+ *
+ * @return 返回0表示成功获取写锁；如果返回负值，则表示获取锁失败，具体错误码定义由系统决定。
+ */
 static inline int mmap_write_lock_killable(struct mm_struct *mm)
 {
-	int ret;
+    int ret;
 
-	__mmap_lock_trace_start_locking(mm, true);
-	ret = down_write_killable(&mm->mmap_lock);
-	__mmap_lock_trace_acquire_returned(mm, true, ret == 0);
-	return ret;
+    // 开始追踪mmap锁的写锁尝试
+    __mmap_lock_trace_start_locking(mm, true);
+
+    // 尝试获取可中断的写锁
+    ret = down_write_killable(&mm->mmap_lock);
+
+    // 调用追踪宏，记录锁获取的结果
+    __mmap_lock_trace_acquire_returned(mm, true, ret == 0);
+
+    // 返回获取写锁的结果
+    return ret;
 }
-
 static inline bool mmap_write_trylock(struct mm_struct *mm)
 {
 	bool ret;
