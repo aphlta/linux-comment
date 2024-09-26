@@ -3264,10 +3264,15 @@ static bool should_clear_pmd_young(void)
 	unsigned long max_seq = READ_ONCE((lruvec)->lrugen.max_seq)
 
 #define DEFINE_MIN_SEQ(lruvec)						\
-	unsigned long min_seq[ANON_AND_FILE] = {			\
-		READ_ONCE((lruvec)->lrugen.min_seq[LRU_GEN_ANON]),	\
-		READ_ONCE((lruvec)->lrugen.min_seq[LRU_GEN_FILE]),	\
-	}
+// 定义一个名为DEFINE_MIN_SEQ的宏，用于初始化min_seq数组。这个宏接收一个参数lruvec，	\
+// 该参数应该是一个包含lrugen成员的结构体指针。这个宏的作用是从lruvec中提取出	\
+// 最小序列号（min_seq）分别对应匿名页面和文件映射页面的序列号。			\
+unsigned long min_seq[ANON_AND_FILE] = {			\
+	// 初始化min_seq数组的第一个元素（匿名页面的最小序列号）			\
+	READ_ONCE((lruvec)->lrugen.min_seq[LRU_GEN_ANON]),	\
+	// 初始化min_seq数组的第二个元素（文件映射页面的最小序列号）			\
+	READ_ONCE((lruvec)->lrugen.min_seq[LRU_GEN_FILE]),	\
+};
 
 #define for_each_gen_type_zone(gen, type, zone)				\
 	for ((gen) = 0; (gen) < MAX_NR_GENS; (gen)++)			\

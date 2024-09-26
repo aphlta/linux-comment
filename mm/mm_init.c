@@ -835,17 +835,35 @@ static void __init init_unavailable_range(unsigned long spfn,
  * (usually MIGRATE_MOVABLE). Besides setting the migratetype, no related
  * zone stats (e.g., nr_isolate_pageblock) are touched.
  */
+/**
+ * 初始化内存映射范围
+ *
+ * 本函数用于初始化给定地址范围内的内存映射。它主要负责根据不同的内存初始化上下文（早期初始化或热插拔初始化）
+ * 设置页面属性，如预留页面、迁移类型等。
+ *
+ * @param size 初始化的内存大小（以字节为单位）
+ * @param nid 节点ID，用于多节点系统中的内存管理
+ * @param zone 内存区域标识，表示内存属于哪个区域（如ZONE_NORMAL、ZONE_DEVICE等）
+ * @param start_pfn 开始物理页号
+ * @param zone_end_pfn 区域结束的物理页号
+ * @param context 内存初始化的上下文，决定如何初始化内存（早期初始化或热插拔初始化）
+ * @param altmap 可选的替代内存映射，用于特殊内存区域处理
+ * @param migratetype 页面的迁移类型，决定页面是否可移动或预留
+ */
 void __meminit memmap_init_range(unsigned long size, int nid, unsigned long zone,
 		unsigned long start_pfn, unsigned long zone_end_pfn,
 		enum meminit_context context,
 		struct vmem_altmap *altmap, int migratetype)
 {
+	// 计算结束物理页号
 	unsigned long pfn, end_pfn = start_pfn + size;
 	struct page *page;
 
+	// 更新最高内存映射页号
 	if (highest_memmap_pfn < end_pfn - 1)
 		highest_memmap_pfn = end_pfn - 1;
 
+	// 如果是设备区内存，处理特殊映射需求
 #ifdef CONFIG_ZONE_DEVICE
 	/*
 	 * Honor reservation requested by the driver for this ZONE_DEVICE
@@ -864,7 +882,9 @@ void __meminit memmap_init_range(unsigned long size, int nid, unsigned long zone
 	}
 #endif
 
+	// 遍历所有物理页
 	for (pfn = start_pfn; pfn < end_pfn; ) {
+		// 处理早期初始化特有的情况
 		/*
 		 * There can be holes in boot-time mem_map[]s handed to this
 		 * function.  They do not exist on hotplugged memory.
@@ -878,11 +898,15 @@ void __meminit memmap_init_range(unsigned long size, int nid, unsigned long zone
 			}
 		}
 
+		// 获取当前页
 		page = pfn_to_page(pfn);
+		// 初始化单个页面
 		__init_single_page(page, pfn, zone, nid);
+		// 如果是热插拔初始化，设置页面为预留状态
 		if (context == MEMINIT_HOTPLUG)
 			__SetPageReserved(page);
 
+		// 如果是页块对齐的，设置迁移类型
 		/*
 		 * Usually, we want to mark the pageblock MIGRATE_MOVABLE,
 		 * such that unmovable allocations won't be scattered all
@@ -896,52 +920,82 @@ void __meminit memmap_init_range(unsigned long size, int nid, unsigned long zone
 	}
 }
 
+/**
+ * 初始化内存映射的区域范围
+ *
+ * 该函数用于初始化一个给定内存区域的内存映射，包括直接初始化和处理空洞区域
+ *
+ * @param zone 指向zone结构体的指针，表示内存区域信息
+ * @param start_pfn 起始物理页号，标记初始化范围的开始
+ * @param end_pfn 结束物理页号，标记初始化范围的结束
+ * @param hole_pfn 指向记录空洞区域起始物理页号的变量，用于更新空洞信息
+ */
 static void __init memmap_init_zone_range(struct zone *zone,
 					  unsigned long start_pfn,
 					  unsigned long end_pfn,
 					  unsigned long *hole_pfn)
 {
+	// 获取zone的起始物理页号和结束物理页号
 	unsigned long zone_start_pfn = zone->zone_start_pfn;
 	unsigned long zone_end_pfn = zone_start_pfn + zone->spanned_pages;
+	// 获取节点ID和区域ID
 	int nid = zone_to_nid(zone), zone_id = zone_idx(zone);
 
+	// 确保start_pfn和end_pfn在zone的范围内
 	start_pfn = clamp(start_pfn, zone_start_pfn, zone_end_pfn);
 	end_pfn = clamp(end_pfn, zone_start_pfn, zone_end_pfn);
 
+	// 如果起始页号大于等于结束页号，则无需处理
 	if (start_pfn >= end_pfn)
 		return;
 
+	// 初始化内存映射范围
 	memmap_init_range(end_pfn - start_pfn, nid, zone_id, start_pfn,
 			  zone_end_pfn, MEMINIT_EARLY, NULL, MIGRATE_MOVABLE);
 
+	// 如果空洞起始页号小于初始化范围的起始页号，则初始化空洞范围
 	if (*hole_pfn < start_pfn)
 		init_unavailable_range(*hole_pfn, start_pfn, zone_id, nid);
 
+	// 更新空洞起始页号为初始化范围的结束页号
 	*hole_pfn = end_pfn;
 }
 
+/**
+ * 初始化内存映射表
+ */
 static void __init memmap_init(void)
 {
+	// 定义页框号变量
 	unsigned long start_pfn, end_pfn;
 	unsigned long hole_pfn = 0;
+	// 定义索引和区域ID变量
 	int i, j, zone_id = 0, nid;
 
+	// 遍历每个内存页框范围
 	for_each_mem_pfn_range(i, MAX_NUMNODES, &start_pfn, &end_pfn, &nid) {
+	// 获取节点数据结构
 		struct pglist_data *node = NODE_DATA(nid);
 
+		// 遍历节点上的所有区域
 		for (j = 0; j < MAX_NR_ZONES; j++) {
+			// 获取区域数据结构
 			struct zone *zone = node->node_zones + j;
 
+			// 如果区域未填充，则跳过
 			if (!populated_zone(zone))
 				continue;
 
+			// 初始化区域内的内存映射
 			memmap_init_zone_range(zone, start_pfn, end_pfn,
 					       &hole_pfn);
+			// 更新区域ID
 			zone_id = j;
 		}
 	}
 
 #ifdef CONFIG_SPARSEMEM
+	// 对空洞区域进行处理
 	/*
 	 * Initialize the memory map for hole in the range [memory_end,
 	 * section_end].
@@ -954,6 +1008,7 @@ static void __init memmap_init(void)
 	end_pfn = round_up(end_pfn, PAGES_PER_SECTION);
 	if (hole_pfn < end_pfn)
 #endif
+		// 初始化不可用内存范围
 		init_unavailable_range(hole_pfn, end_pfn, zone_id, nid);
 }
 
@@ -1361,50 +1416,103 @@ static void __meminit pgdat_init_internals(struct pglist_data *pgdat)
 	lruvec_init(&pgdat->__lruvec);
 }
 
+/**
+ * 初始化内存区域的内部结构。
+ *
+ * 该函数负责将基本属性赋值给内存区域（zone）结构，并初始化相关同步机制。
+ * 它被设计为内存区域初始化过程的一部分，主要负责内部结构和参数的设置。
+ *
+ * @param zone 将要初始化的内存区域结构指针。
+ * @param idx 内存区域的类型枚举值。
+ * @param nid 节点ID，标识所属的NUMA节点。
+ * @param remaining_pages 该区域内剩余的页数。
+ */
 static void __meminit zone_init_internals(struct zone *zone, enum zone_type idx, int nid,
 							unsigned long remaining_pages)
 {
+	// 设置该区域内受管理的页数。
 	atomic_long_set(&zone->managed_pages, remaining_pages);
+
+	// 设置节点ID。
 	zone_set_nid(zone, nid);
+
+	// 根据区域类型枚举值设置区域名称。
 	zone->name = zone_names[idx];
+
+	// 将区域的pgdat指针指向节点的数据结构。
 	zone->zone_pgdat = NODE_DATA(nid);
+
+	// 初始化自旋锁，用于保护区域结构的并发访问。
 	spin_lock_init(&zone->lock);
+
+	// 初始化序列锁，用于协调对区域内部数据的读取。
 	zone_seqlock_init(zone);
+
+	// 初始化pcp相关的结构。
 	zone_pcp_init(zone);
 }
 
+/**
+ * __meminit zone_init_free_lists - 初始化内存区域中的空闲列表
+ * @zone: 指向需要初始化的内存区域的指针
+ *
+ * 该函数遍历所有迁移类型和顺序，初始化每个迁移类型下指定顺序的空闲列表，
+ * 并将每个顺序下的空闲数量重置为0。此外，根据配置，可能还会初始化未接受页面列表。
+ */
 static void __meminit zone_init_free_lists(struct zone *zone)
 {
 	unsigned int order, t;
+	// 遍历所有迁移类型和顺序，初始化空闲列表并重置空闲数量
 	for_each_migratetype_order(order, t) {
 		INIT_LIST_HEAD(&zone->free_area[order].free_list[t]);
 		zone->free_area[order].nr_free = 0;
 	}
 
+	// 根据配置可能初始化未接受内存页面列表
 #ifdef CONFIG_UNACCEPTED_MEMORY
 	INIT_LIST_HEAD(&zone->unaccepted_pages);
 #endif
 }
 
+/**
+ * 初始化一个当前为空的内存区域。
+ *
+ * 该函数用于在系统启动过程中初始化一个指定的内存区域。它接收一个指向zone结构的指针，
+ * 该区域的起始PFN（物理页号）和区域的大小（以PFN计数）。这个函数假设所初始化的区域在调用时是空的，
+ * 没有任何页面被分配或使用。
+ *
+ * @param zone 指向要初始化的zone结构的指针。
+ * @param zone_start_pfn 初始化区域的起始PFN。
+ * @param size 区域的大小，以PFN（物理页号）的数量表示。
+ */
 void __meminit init_currently_empty_zone(struct zone *zone,
 					unsigned long zone_start_pfn,
 					unsigned long size)
 {
+    // 获取zone关联的pglist_data结构指针。
 	struct pglist_data *pgdat = zone->zone_pgdat;
+
+    // 计算并获取当前zone的索引，用于标识zone的位置，然后加1。
 	int zone_idx = zone_idx(zone) + 1;
 
+    // 如果计算得到的zone索引大于当前记录的最大索引，更新最大索引值。
 	if (zone_idx > pgdat->nr_zones)
 		pgdat->nr_zones = zone_idx;
 
+    // 设置zone的起始PFN为传入的值。
 	zone->zone_start_pfn = zone_start_pfn;
 
+    // 打印初始化信息，标识正在初始化的节点ID和zone索引，以及起始和结束PFN。
 	mminit_dprintk(MMINIT_TRACE, "memmap_init",
 			"Initialising map node %d zone %lu pfns %lu -> %lu\n",
 			pgdat->node_id,
 			(unsigned long)zone_idx(zone),
 			zone_start_pfn, (zone_start_pfn + size));
 
+    // 初始化zone内的空闲列表。
 	zone_init_free_lists(zone);
+
+    // 将zone标记为已初始化。
 	zone->initialized = 1;
 }
 
@@ -1543,21 +1651,37 @@ void __ref free_area_init_core_hotplug(struct pglist_data *pgdat)
  * NOTE: pgdat should get zeroed by caller.
  * NOTE: this function is only called during early init.
  */
+/**
+ * 初始化节点的空闲内存区域
+ *
+ * 该函数负责计算和初始化节点上每个内存区域的空闲内存页数，并进行必要的内存预留
+ * 对于不同的内存区域类型（如低内存和高内存），处理方式有所不同
+ *
+ * @param pgdat 指向pglist_data结构的指针，用于维护节点的页面列表数据
+ */
 static void __init free_area_init_core(struct pglist_data *pgdat)
 {
+	// 遍历所有内存区域类型
 	enum zone_type j;
+	// 节点ID
 	int nid = pgdat->node_id;
 
+	// 初始化pgdat内部结构
 	pgdat_init_internals(pgdat);
+	// 初始化节点的每个CPU统计信息指针
 	pgdat->per_cpu_nodestats = &boot_nodestats;
 
+	// 遍历所有内存区域
 	for (j = 0; j < MAX_NR_ZONES; j++) {
+		// 获取当前区域
 		struct zone *zone = pgdat->node_zones + j;
 		unsigned long size, freesize, memmap_pages;
 
+		// 初始化区域总页数和空闲页数
 		size = zone->spanned_pages;
 		freesize = zone->present_pages;
 
+		// 计算用于内存映射的页数，并调整空闲页数
 		/*
 		 * Adjust freesize so that it accounts for how much memory
 		 * is used by this zone for memmap. This affects the watermark
@@ -1575,18 +1699,25 @@ static void __init free_area_init_core(struct pglist_data *pgdat)
 					zone_names[j], memmap_pages, freesize);
 		}
 
+		// 预留DMA所需的页面
 		/* Account for reserved pages */
+
 		if (j == 0 && freesize > dma_reserve) {
 			freesize -= dma_reserve;
 			pr_debug("  %s zone: %lu pages reserved\n", zone_names[0], dma_reserve);
 		}
 
+		// 更新内核可用页面数
 		if (!is_highmem_idx(j))
 			nr_kernel_pages += freesize;
+		// 如果有足够的内核页面，为高内存区域的内存映射分配页面
 		/* Charge for highmem memmap if there are enough kernel pages */
 		else if (nr_kernel_pages > memmap_pages * 2)
 			nr_kernel_pages -= memmap_pages;
+		// 更新所有页面的总数
 		nr_all_pages += freesize;
+
+		// 初始化区域内部结构，设置初始空闲页面数
 
 		/*
 		 * Set an approximate value for lowmem here, it will be adjusted
@@ -1595,10 +1726,13 @@ static void __init free_area_init_core(struct pglist_data *pgdat)
 		 */
 		zone_init_internals(zone, j, nid, freesize);
 
+		// 如果区域大小为0，则跳过后续初始化
 		if (!size)
 			continue;
 
+		// 设置区域的使用位图
 		setup_usemap(zone);
+		// 初始化当前空闲区域
 		init_currently_empty_zone(zone, zone->zone_start_pfn, size);
 	}
 }
@@ -1702,37 +1836,61 @@ void __init get_pfn_range_for_nid(unsigned int nid,
 		*start_pfn = 0;
 }
 
+/**
+ * 初始化指定节点的空闲内存区域
+ *
+ * 该函数用于初始化系统启动时指定节点的空闲内存区域，包括设置节点ID、
+ * 起始段和结束段页号，计算节点总页数，以及初始化核心空闲区域等操作。
+ *
+ * @param nid 节点标识符
+ */
 static void __init free_area_init_node(int nid)
 {
+	// 获取节点的数据结构
 	pg_data_t *pgdat = NODE_DATA(nid);
+	// 定义节点的起始页号和结束页号
 	unsigned long start_pfn = 0;
 	unsigned long end_pfn = 0;
+
+	// 确保在分配pg_data_t时已将其正确地初始化为零
 
 	/* pg_data_t should be reset to zero when it's allocated */
 	WARN_ON(pgdat->nr_zones || pgdat->kswapd_highest_zoneidx);
 
+	// 获取指定节点的页号范围
 	get_pfn_range_for_nid(nid, &start_pfn, &end_pfn);
 
+	// 设置节点ID和起始页号
 	pgdat->node_id = nid;
 	pgdat->node_start_pfn = start_pfn;
+	// 目前每个CPU的节点统计信息为空
 	pgdat->per_cpu_nodestats = NULL;
 
+	// 根据页号范围初始化内存区域
 	if (start_pfn != end_pfn) {
+		// 打印节点内存范围信息
 		pr_info("Initmem setup node %d [mem %#018Lx-%#018Lx]\n", nid,
 			(u64)start_pfn << PAGE_SHIFT,
 			end_pfn ? ((u64)end_pfn << PAGE_SHIFT) - 1 : 0);
 
+		// 计算并设置节点的总页数
 		calculate_node_totalpages(pgdat, start_pfn, end_pfn);
 	} else {
+		// 打印无内存节点信息
 		pr_info("Initmem setup node %d as memoryless\n", nid);
 
+		// 对无内存节点进行特殊处理
 		reset_memoryless_node_totalpages(pgdat);
 	}
 
+	// 分配节点内存映射
 	alloc_node_mem_map(pgdat);
+	// 设置节点的延迟范围
 	pgdat_set_deferred_range(pgdat);
 
+	// 核心空闲区域初始化
 	free_area_init_core(pgdat);
+	// 初始化lru生成相关的节点数据
 	lru_gen_init_pgdat(pgdat);
 }
 
@@ -1794,36 +1952,49 @@ void __init free_area_init(unsigned long *max_zone_pfn)
 	int i, nid, zone;
 	bool descending;
 
+	/* 初始化区域最低和最高可能页框号（PFN） */
+
 	/* Record where the zone boundaries are */
+
 	memset(arch_zone_lowest_possible_pfn, 0,
 				sizeof(arch_zone_lowest_possible_pfn));
 	memset(arch_zone_highest_possible_pfn, 0,
 				sizeof(arch_zone_highest_possible_pfn));
 
+	/* 获取DRAM的起始页框号 */
 	start_pfn = PHYS_PFN(memblock_start_of_DRAM());
+	/* 检查体系结构是否具有降序的最大区域页框号 */
 	descending = arch_has_descending_max_zone_pfns();
 
+	/* 遍历所有内存区域，设置其边界 */
 	for (i = 0; i < MAX_NR_ZONES; i++) {
 		if (descending)
 			zone = MAX_NR_ZONES - i - 1;
 		else
 			zone = i;
 
+		/* 跳过可移动区域 */
 		if (zone == ZONE_MOVABLE)
 			continue;
 
+		/* 更新区域的结束页框号 */
 		end_pfn = max(max_zone_pfn[zone], start_pfn);
+		/* 记录区域的最低和最高可能页框号 */
 		arch_zone_lowest_possible_pfn[zone] = start_pfn;
 		arch_zone_highest_possible_pfn[zone] = end_pfn;
 
+		/* 为下一个区域准备起始页框号 */
 		start_pfn = end_pfn;
 	}
 
+	/* 确定每个节点的可移动区域起始页框号 */
 	/* Find the PFNs that ZONE_MOVABLE begins at in each node */
 	memset(zone_movable_pfn, 0, sizeof(zone_movable_pfn));
 	find_zone_movable_pfns_for_nodes();
 
+	/* 打印出各内存区域的范围 */
 	/* Print out the zone ranges */
+
 	pr_info("Zone ranges:\n");
 	for (i = 0; i < MAX_NR_ZONES; i++) {
 		if (i == ZONE_MOVABLE)
@@ -1840,6 +2011,8 @@ void __init free_area_init(unsigned long *max_zone_pfn)
 					<< PAGE_SHIFT) - 1);
 	}
 
+	/* 打印出每个节点的可移动区域起始页框号 */
+
 	/* Print out the PFNs ZONE_MOVABLE begins at in each node */
 	pr_info("Movable zone start for each node\n");
 	for (i = 0; i < MAX_NUMNODES; i++) {
@@ -1848,6 +2021,7 @@ void __init free_area_init(unsigned long *max_zone_pfn)
 			       (u64)zone_movable_pfn[i] << PAGE_SHIFT);
 	}
 
+	/* 打印节点内存范围并初始化子区映射 */
 	/*
 	 * Print out the early node map, and initialize the
 	 * subsection-map relative to active online memory ranges to
@@ -1861,7 +2035,9 @@ void __init free_area_init(unsigned long *max_zone_pfn)
 		subsection_map_init(start_pfn, end_pfn - start_pfn);
 	}
 
+	/* 初始化所有节点 */
 	/* Initialise every node */
+
 	mminit_verify_pageflags_layout();
 	setup_nr_node_ids();
 	set_pageblock_order();
@@ -1869,6 +2045,7 @@ void __init free_area_init(unsigned long *max_zone_pfn)
 	for_each_node(nid) {
 		pg_data_t *pgdat;
 
+		/* 对于不在线的节点，作为无内存节点初始化 */
 		if (!node_online(nid)) {
 			pr_info("Initializing node %d as memoryless\n", nid);
 
@@ -1896,14 +2073,17 @@ void __init free_area_init(unsigned long *max_zone_pfn)
 		pgdat = NODE_DATA(nid);
 		free_area_init_node(nid);
 
+		/* 如果节点上有内存，设置节点状态 */
 		/* Any memory on that node */
 		if (pgdat->node_present_pages)
 			node_set_state(nid, N_MEMORY);
 		check_for_memory(pgdat);
 	}
 
+	/* 初始化内存映射 */
 	memmap_init();
 
+	/* 针对单节点系统禁用哈希分布 */
 	/* disable hash distribution for systems with a single node */
 	fixup_hashdist();
 }
@@ -2764,44 +2944,69 @@ static void __init mem_init_print_info(void)
 }
 
 /*
+ * 设置内核内存分配器
+ */
+/*
  * Set up kernel memory allocators
  */
 void __init mm_core_init(void)
 {
+	// 初始化依赖于SMP设置的操作
 	/* Initializations relying on SMP setup */
+
 	build_all_zonelists(NULL);
 	page_alloc_init_cpuhp();
 
+	// page_ext要求连续的页面，大于MAX_ORDER除非是SPARSEMEM
 	/*
 	 * page_ext requires contiguous pages,
 	 * bigger than MAX_ORDER unless SPARSEMEM.
 	 */
 	page_ext_init_flatmem();
+	// 初始化内存调试和硬化
 	mem_debugging_and_hardening_init();
+	// 初始化kfence分配池
 	kfence_alloc_pool();
+	// 报告内存初始化情况
 	report_meminit();
+	// 初始化kmsan阴影内存
 	kmsan_init_shadow();
+	// 早期初始化栈仓库
 	stack_depot_early_init();
+	// 执行内存初始化
 	mem_init();
+	// 打印内存初始化信息
 	mem_init_print_info();
+	// 初始化kmem缓存
 	kmem_cache_init();
+	// page_owner必须在buddy准备好之后以及slab准备好之后初始化，以确保stack_depot_init()正常工作
 	/*
 	 * page_owner must be initialized after buddy is ready, and also after
 	 * slab is ready so that stack_depot_init() works properly
 	 */
 	page_ext_init_flatmem_late();
+	// 初始化kmemleak检测
 	kmemleak_init();
+	// 初始化ptlock缓存
 	ptlock_cache_init();
+	// 初始化页表缓存
 	pgtable_cache_init();
+	// 初始化debug_objects内存检测
 	debug_objects_mem_init();
+	// 初始化vmalloc
 	vmalloc_init();
+	// 如果没有延迟初始化的page_ext，现在就进行初始化，因为vmap已完全初始化
 	/* If no deferred init page_ext now, as vmap is fully initialized */
 	if (!deferred_struct_pages)
 		page_ext_init();
+	// 应在创建第一个非初始化线程之前运行
 	/* Should be run before the first non-init thread is created */
 	init_espfix_bsp();
+	// 应在espfix64设置完毕后运行
 	/* Should be run after espfix64 is set up. */
 	pti_init();
+	// 初始化kmsan运行时
 	kmsan_init_runtime();
+	// 初始化mm缓存
 	mm_cache_init();
 }

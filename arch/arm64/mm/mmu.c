@@ -562,8 +562,17 @@ static inline void arm64_kfence_map_pool(phys_addr_t kfence_pool, pgd_t *pgdp) {
 
 #endif /* CONFIG_KFENCE */
 
+/**
+ * 初始化内存映射
+ *
+ * 该函数负责建立物理地址到虚拟地址的映射，涵盖所有内存区间
+ * 包括内核文本段和数据段，并确保正确的内存访问权限设置
+ *
+ * @param pgdp 指向页全局目录表的指针
+ */
 static void __init map_mem(pgd_t *pgdp)
 {
+	// 直接映射结束地址
 	static const u64 direct_map_end = _PAGE_END(VA_BITS_MIN);
 	phys_addr_t kernel_start = __pa_symbol(_stext);
 	phys_addr_t kernel_end = __pa_symbol(__init_begin);
@@ -572,6 +581,7 @@ static void __init map_mem(pgd_t *pgdp)
 	int flags = NO_EXEC_MAPPINGS;
 	u64 i;
 
+	// 确保线性区域和vmalloc区域在PGD级别不共享表项
 	/*
 	 * Setting hierarchical PXNTable attributes on table entries covering
 	 * the linear region is only possible if it is guaranteed that no table
@@ -586,6 +596,7 @@ static void __init map_mem(pgd_t *pgdp)
 	if (can_set_direct_map())
 		flags |= NO_BLOCK_MAPPINGS | NO_CONT_MAPPINGS;
 
+	// 将内核的只读文本和数据段标记为NOMAP，以避免创建可写的别名
 	/*
 	 * Take care not to create a writable alias for the
 	 * read-only text and rodata sections of the kernel image.
@@ -594,10 +605,13 @@ static void __init map_mem(pgd_t *pgdp)
 	 */
 	memblock_mark_nomap(kernel_start, kernel_end - kernel_start);
 
+	// 映射所有内存区间
 	/* map all the memory banks */
+
 	for_each_mem_range(i, &start, &end) {
 		if (start >= end)
 			break;
+		// 设置线性映射允许分配标签读写，其他属性与PAGE_KERNEL相同
 		/*
 		 * The linear map must allow allocation tags reading/writing
 		 * if MTE is present. Otherwise, it has the same attributes as
@@ -607,6 +621,7 @@ static void __init map_mem(pgd_t *pgdp)
 			       flags);
 	}
 
+	// 将内核文本段和数据段的线性别名映射为不可执行，去除写权限
 	/*
 	 * Map the linear alias of the [_stext, __init_begin) interval
 	 * as non-executable now, and remove the write permission in
@@ -786,26 +801,47 @@ static void __init create_idmap(void)
 	}
 }
 
+/**
+ * paging_init 初始化分页系统。
+ * 此函数完成从纯线性地址空间环境到分页地址空间环境的转换。
+ * 它涉及设置页表、计算身份映射区域大小以及映射内核空间和内存。
+ * 最后切换到新的页目录，释放不必要的内存，并允许内存块调整大小及创建身份映射。
+ */
+
 void __init paging_init(void)
 {
+	// 获取页目录指针并设置固定映射
 	pgd_t *pgdp = pgd_set_fixmap(__pa_symbol(swapper_pg_dir));
+
+	// 声明初始化身份映射页目录数组
 	extern pgd_t init_idmap_pg_dir[];
 
+	// 根据初始化区域末尾地址计算身份映射区域大小
 	idmap_t0sz = 63UL - __fls(__pa_symbol(_end) | GENMASK(VA_BITS_MIN - 1, 0));
 
+	// 映射内核空间
 	map_kernel(pgdp);
+
+	// 映射内存区域
 	map_mem(pgdp);
 
+	// 清除固定映射
 	pgd_clear_fixmap();
 
+	// 替换 TTBR1 寄存器中的页目录
 	cpu_replace_ttbr1(lm_alias(swapper_pg_dir), init_idmap_pg_dir);
+
+	// 设置初始内存管理结构的页目录
 	init_mm.pgd = swapper_pg_dir;
 
+	// 释放 init_pg_dir 所占用的物理内存
 	memblock_phys_free(__pa_symbol(init_pg_dir),
 			   __pa_symbol(init_pg_end) - __pa_symbol(init_pg_dir));
 
+	// 允许内存块调整大小
 	memblock_allow_resize();
 
+	// 创建身份映射
 	create_idmap();
 }
 

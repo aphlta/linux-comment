@@ -198,6 +198,9 @@ struct maple_subtree_state {
 	struct maple_big_node *bn;
 };
 
+// alex's qustion : 写maple_tree的时候是锁整棵树还是锁定需要修改的节点?
+
+
 #ifdef CONFIG_KASAN_STACK
 /* Prevent mas_wr_bnode() from exceeding the stack frame limit */
 #define noinline_for_kasan noinline_for_stack
@@ -235,9 +238,19 @@ static void mt_free_rcu(struct rcu_head *head)
  * The maple tree uses the parent pointer to indicate this node is no longer in
  * use and will be freed.
  */
+/*
+ * ma_free_rcu() - 使用RCU回调来释放一个maple节点
+ * @node: 要释放的节点
+ *
+ * Maple树使用父指针指示该节点不再使用并将被释放。
+ * 通过RCU回调机制来安全地延迟释放节点，以确保所有引用都已放下。
+ */
 static void ma_free_rcu(struct maple_node *node)
 {
+    // 确保节点的父指针正确设置了ma_parent_ptr，这是检测使用不当的辅助手段。
 	WARN_ON(node->parent != ma_parent_ptr(node));
+
+    // 调用RCU回调，当所有引用都放下后，mt_free_rcu将负责释放节点。
 	call_rcu(&node->rcu, mt_free_rcu);
 }
 
@@ -262,16 +275,34 @@ static inline enum maple_type mte_node_type(const struct maple_enode *entry)
 		MAPLE_NODE_TYPE_MASK;
 }
 
+/**
+ * 判断给定的类型是否为密集型节点类型。
+ *
+ * @param type 要判断的节点类型。
+ * @return 如果类型为密集型节点类型，则返回true；否则返回false。
+ */
 static inline bool ma_is_dense(const enum maple_type type)
 {
 	return type < maple_leaf_64;
 }
 
+/**
+ * 判断给定的类型是否为叶节点类型。
+ *
+ * @param type 要判断的节点类型。
+ * @return 如果类型为叶节点类型，则返回true；否则返回false。
+ */
 static inline bool ma_is_leaf(const enum maple_type type)
 {
 	return type < maple_range_64;
 }
 
+/**
+ * 判断给定的maple_enode结构体指针所指向的节点是否为叶节点。
+ *
+ * @param entry 指向maple_enode结构体的指针。
+ * @return 如果节点为叶节点，则返回true；否则返回false。
+ */
 static inline bool mte_is_leaf(const struct maple_enode *entry)
 {
 	return ma_is_leaf(mte_node_type(entry));
@@ -344,8 +375,15 @@ static inline struct maple_node *mte_to_node(const struct maple_enode *entry)
  *
  * Return: a maple topiary pointer
  */
+/*
+ * mte_to_mat() - 将枫树编码的节点转换为枫树修剪节点。
+ * @entry: 枫树编码的节点
+ *
+ * 返回: 枫树修剪指针
+ */
 static inline struct maple_topiary *mte_to_mat(const struct maple_enode *entry)
 {
+    // 通过应用位操作去除枫树节点掩码，转换为枫树修剪节点
 	return (struct maple_topiary *)
 		((unsigned long)entry & ~MAPLE_NODE_MASK);
 }
@@ -378,6 +416,14 @@ static inline void mte_set_node_dead(struct maple_enode *mn)
 /* Bit 2 means a NULL somewhere below */
 #define MAPLE_ENODE_NULL		0x04
 
+/**
+ * mt_mk_node - 创建一个增强型节点结构
+ * @node: 指向节点结构的指针
+ * @type: 节点的类型
+ *
+ * 该函数将一个普通的节点结构指针转换为增强型节点指针，并设置节点类型标志。
+ * 返回值是包含类型信息的增强型节点指针。
+ */
 static inline struct maple_enode *mt_mk_node(const struct maple_node *node,
 					     enum maple_type type)
 {
@@ -385,46 +431,107 @@ static inline struct maple_enode *mt_mk_node(const struct maple_node *node,
 			(type << MAPLE_ENODE_TYPE_SHIFT) | MAPLE_ENODE_NULL);
 }
 
+/**
+ * mte_mk_root - 将节点标记为根节点
+ * @node: 指向增强型节点结构的指针
+ *
+ * 该函数将传入的增强型节点指针标记为根节点，并返回标记后的指针。
+ * 通过将MAPLE_ROOT_NODE标志与节点指针的地址进行或运算来实现。
+ */
 static inline void *mte_mk_root(const struct maple_enode *node)
 {
 	return (void *)((unsigned long)node | MAPLE_ROOT_NODE);
 }
 
+/**
+ * mte_safe_root - 移除节点的根节点标记
+ * @node: 指向增强型节点结构的指针
+ *
+ * 该函数移除增强型节点指针的根节点标记，并返回处理后的指针。
+ * 使用按位与操作，掩码为MAPLE_ROOT_NODE的补码，以清除根节点标记。
+ */
 static inline void *mte_safe_root(const struct maple_enode *node)
 {
 	return (void *)((unsigned long)node & ~MAPLE_ROOT_NODE);
 }
 
+/**
+ * mte_set_full - 设置节点的完整标记
+ * @node: 指向增强型节点结构的指针
+ *
+ * 该函数清除节点的空标记（MAPLE_ENODE_NULL），意味着节点变为完整状态。
+ * 返回移除空标记后的节点指针。
+ */
 static inline void *mte_set_full(const struct maple_enode *node)
 {
 	return (void *)((unsigned long)node & ~MAPLE_ENODE_NULL);
 }
 
+/**
+ * mte_clear_full - 清除节点的完整标记
+ * @node: 指向增强型节点结构的指针
+ *
+ * 该函数设置节点的空标记（MAPLE_ENODE_NULL），表示节点不完整。
+ * 返回设置空标记后的节点指针。
+ */
 static inline void *mte_clear_full(const struct maple_enode *node)
 {
 	return (void *)((unsigned long)node | MAPLE_ENODE_NULL);
 }
 
+/**
+ * mte_has_null - 检查节点是否被标记为空
+ * @node: 指向增强型节点结构的指针
+ *
+ * 该函数检查节点是否设置了空标记。如果设置了，返回true；否则返回false。
+ */
 static inline bool mte_has_null(const struct maple_enode *node)
 {
 	return (unsigned long)node & MAPLE_ENODE_NULL;
 }
 
+/**
+ * ma_is_root - 判断给定节点是否为根节点
+ * @node: 指向节点结构的指针
+ *
+ * 该函数检查节点的父节点是否被标记为根节点。如果是，返回true；否则返回false。
+ */
 static inline bool ma_is_root(struct maple_node *node)
 {
 	return ((unsigned long)node->parent & MA_ROOT_PARENT);
 }
 
+/**
+ * mte_is_root - 判断增强型节点是否为根节点
+ * @node: 指向增强型节点结构的指针
+ *
+ * 该函数调用ma_is_root来检查传入的增强型节点是否为根节点。
+ * 首先将增强型节点转换为普通节点，然后进行判断。
+ */
 static inline bool mte_is_root(const struct maple_enode *node)
 {
 	return ma_is_root(mte_to_node(node));
 }
 
+/**
+ * mas_is_root_limits - 检查状态结构是否表示根节点的限制
+ * @mas: 指向状态结构的指针
+ *
+ * 该函数检查状态结构的最小值是否为0，最大值是否为ULONG_MAX。
+ * 如果是，则表示该状态代表了根节点的限制，返回true；否则返回false。
+ */
 static inline bool mas_is_root_limits(const struct ma_state *mas)
 {
 	return !mas->min && mas->max == ULONG_MAX;
 }
 
+/**
+ * mt_is_alloc - 判断映射树是否处于分配状态
+ * @mt: 指向映射树结构的指针
+ *
+ * 该函数检查映射树的标志位，确定是否设置了分配范围标志。
+ * 如果设置了，返回true，表示映射树正在被分配；否则返回false。
+ */
 static inline bool mt_is_alloc(struct maple_tree *mt)
 {
 	return (mt->ma_flags & MT_FLAGS_ALLOC_RANGE);
@@ -1226,6 +1333,18 @@ static inline void mte_set_gap(const struct maple_enode *mn,
  * May find a dead node which will cause a premature return.
  * Return: 1 on dead node, 0 otherwise
  */
+/**
+ * 根据给定的 maple access state (mas) 结构体逐步向上遍历 maple tree，
+ * 更新 mas 中记录的最小值 (min) 和最大值 (max)。这个函数主要用于
+ * 在 maple tree 中定位某个节点的祖先节点，并计算出相对于该祖先节点的
+ * 偏移量 (offset)。
+ *
+ * @param mas 指向 maple access state (mas) 结构体的指针，该结构体包含了遍历所需的
+ *            各种信息，如当前节点、父节点类型、最小值、最大值等。
+ * @return 返回一个整数，具体含义如下：
+ *         - 0 表示遍历成功完成。
+ *         - 1 表示遍历过程中遇到错误，如死节点或循环引用。
+ */
 static int mas_ascend(struct ma_state *mas)
 {
 	struct maple_enode *p_enode; /* parent enode. */
@@ -1238,16 +1357,21 @@ static int mas_ascend(struct ma_state *mas)
 	unsigned long *pivots;
 	bool set_max = false, set_min = false;
 
+	// 获取 mas 结构体中的当前 node。
 	a_node = mas_mn(mas);
+	// 如果当前 node 是根节点，则重置偏移量并返回。
 	if (ma_is_root(a_node)) {
 		mas->offset = 0;
 		return 0;
 	}
 
+	// 获取当前 node 的父 node。
 	p_node = mte_parent(mas->node);
+	// 如果当前 node 和其父 node 相同，则返回错误。
 	if (unlikely(a_node == p_node))
 		return 1;
 
+	// 获取当前 node 的父节点类型和偏移量，并构建父 node 的 enode。
 	a_type = mas_parent_type(mas, mas->node);
 	mas->offset = mte_parent_slot(mas->node);
 	a_enode = mt_mk_node(p_node, a_type);
@@ -1256,23 +1380,31 @@ static int mas_ascend(struct ma_state *mas)
 	if (p_node != mte_parent(mas->node))
 		return 1;
 
+	// 更新当前 enode 为父 enode。
 	mas->node = a_enode;
 
+	// 如果当前 enode 是根节点，则重置最大值和最小值并返回。
 	if (mte_is_root(a_enode)) {
 		mas->max = ULONG_MAX;
 		mas->min = 0;
 		return 0;
 	}
 
+	// 如果最小值未被设置，则准备设置最小值。
 	if (!mas->min)
 		set_min = true;
 
+	// 如果最大值未被设置，则准备设置最大值。
 	if (mas->max == ULONG_MAX)
 		set_max = true;
 
+	// 初始化最小值和最大值。
 	min = 0;
 	max = ULONG_MAX;
+
+	// 遍历祖先节点，直到找到合适的最小值和最大值。
 	do {
+		// 保存当前 enode 和其父节点信息。
 		p_enode = a_enode;
 		a_type = mas_parent_type(mas, p_enode);
 		a_node = mte_parent(p_enode);
@@ -1280,27 +1412,34 @@ static int mas_ascend(struct ma_state *mas)
 		a_enode = mt_mk_node(a_node, a_type);
 		pivots = ma_pivots(a_node, a_type);
 
+		// 如果遇到死节点，则返回错误。
 		if (unlikely(ma_dead_node(a_node)))
 			return 1;
 
+		// 如果最小值未被设置且当前槽位不是第一个，则准备设置最小值。
 		if (!set_min && a_slot) {
 			set_min = true;
 			min = pivots[a_slot - 1] + 1;
 		}
 
+		// 如果最大值未被设置且当前槽位不是最后一个，则准备设置最大值。
 		if (!set_max && a_slot < mt_pivots[a_type]) {
 			set_max = true;
 			max = pivots[a_slot];
 		}
 
+		// 如果遇到死节点，则返回错误。
 		if (unlikely(ma_dead_node(a_node)))
 			return 1;
 
+		// 如果当前节点是根节点，则退出循环。
 		if (unlikely(ma_is_root(a_node)))
 			break;
 
+	// 继续遍历直到最小值和最大值都被设置。
 	} while (!set_min || !set_max);
 
+	// 更新 mas 结构体中的最大值和最小值。
 	mas->max = max;
 	mas->min = min;
 	return 0;
@@ -1312,16 +1451,31 @@ static int mas_ascend(struct ma_state *mas)
  *
  * Return: A pointer to a maple node.
  */
+/**
+ * 从ma_state结构中弹出一个节点。
+ *
+ * 该函数负责从给定的ma_state指针mas中移除并返回一个分配节点。
+ * 它处理不同情况下的节点移除逻辑，如只有一个分配、节点中只有一个分配等。
+ *
+ * @param mas ma_state的指针，表示当前的状态。
+ * @return 返回一个maple_node结构指针，指向移除的节点。
+ */
 static inline struct maple_node *mas_pop_node(struct ma_state *mas)
 {
+    // 定义将要返回的分配节点指针和当前节点指针
 	struct maple_alloc *ret, *node = mas->alloc;
+	// 获取当前已分配的总数
 	unsigned long total = mas_allocated(mas);
+	// 获取当前的分配请求
 	unsigned int req = mas_alloc_req(mas);
 
+	// 检查如果没有分配或者有挂起的请求，返回NULL
 	/* nothing or a request pending. */
+
 	if (WARN_ON(!total))
 		return NULL;
 
+	// 如果只有一个分配存在，直接移除并返回该分配
 	if (total == 1) {
 		/* single allocation in this ma_state */
 		mas->alloc = NULL;
@@ -1329,6 +1483,7 @@ static inline struct maple_node *mas_pop_node(struct ma_state *mas)
 		goto single_node;
 	}
 
+	// 如果当前节点有多个分配，处理其中一个分配的移除
 	if (node->node_count == 1) {
 		/* Single allocation in this node. */
 		mas->alloc = node->slot[0];
@@ -1341,13 +1496,17 @@ static inline struct maple_node *mas_pop_node(struct ma_state *mas)
 	node->slot[node->node_count] = NULL;
 
 single_node:
+	// 对下一个节点进行处理
 new_head:
+	// 如果有挂起的请求，递增请求并更新mas状态
 	if (req) {
 		req++;
 		mas_set_alloc_req(mas, req);
 	}
 
+	// 清零返回的节点内存，确保后续使用时状态干净
 	memset(ret, 0, sizeof(*ret));
+	// 将返回的节点指针强制转换为maple_node类型并返回
 	return (struct maple_node *)ret;
 }
 

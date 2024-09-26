@@ -37,43 +37,96 @@ static inline pte_t *fixmap_pte(unsigned long addr)
 	return &bm_pte[BM_PTE_TABLE_IDX(addr)][pte_index(addr)];
 }
 
+/**
+ * early_fixmap_init_pte - 在早期启动阶段初始化PTE（页表项）的函数
+ *
+ * 本函数旨在处理在系统早期启动阶段页表的相关初始化。具体来说，
+ * 当给定的页目录项（pmd）为空（即没有关联的页表）时，该函数会根据
+ * 物理地址生成一个新的页表项，并将其关联到指定的页目录项上。
+ *
+ * @pmdp: 指向页目录项（pmd）的指针，该目录项需要被初始化。
+ * @addr: 物理地址，用于计算对应的页表项基地址。
+ */
 static void __init early_fixmap_init_pte(pmd_t *pmdp, unsigned long addr)
 {
+	// 读取页目录项的当前值，确保原子性
 	pmd_t pmd = READ_ONCE(*pmdp);
 	pte_t *ptep;
 
+	// 如果页目录项没有关联的页表
 	if (pmd_none(pmd)) {
+		// 获取对应物理地址的预定义页表项
 		ptep = bm_pte[BM_PTE_TABLE_IDX(addr)];
+		// 创建一个新的页目录项，将其关联到获取的页表项物理地址
 		__pmd_populate(pmdp, __pa_symbol(ptep), PMD_TYPE_TABLE);
 	}
 }
 
+/**
+ * early_fixmap_init_pmd - 初始化PMD级别的页表项
+ * @pudp: 指向页目录项的指针
+ * @addr: 要初始化的地址起始位置
+ * @end: 初始化的结束地址
+ *
+ * 该函数负责在早期引导过程中初始化PMD（页中间目录）级别的页表项。
+ * 它首先检查给定页目录项（PUD）是否为空，如果为空，则用物理地址填充。
+ * 然后，函数迭代地址范围内的PMD项，并调用early_fixmap_init_pte来初始化
+ * 每个PMD项内的页表项。
+ */
 static void __init early_fixmap_init_pmd(pud_t *pudp, unsigned long addr,
 					 unsigned long end)
 {
+	// 计算下一个地址边界
 	unsigned long next;
+	// 读取一次页目录项的值，优化并发访问
 	pud_t pud = READ_ONCE(*pudp);
+	// 指向页中间目录项的指针
 	pmd_t *pmdp;
 
+	// 如果页目录项为空，则填充它
 	if (pud_none(pud))
 		__pud_populate(pudp, __pa_symbol(bm_pmd), PUD_TYPE_TABLE);
 
+	// 计算页中间目录项的起始地址
 	pmdp = pmd_offset_kimg(pudp, addr);
+	// 遍历地址范围，初始化每个PMD项
 	do {
+		// 计算下一个地址边界
 		next = pmd_addr_end(addr, end);
+		// 初始化当前PMD项内的页表项
 		early_fixmap_init_pte(pmdp, addr);
 	} while (pmdp++, addr = next, addr != end);
 }
 
-
+/**
+ * early_fixmap_init_pud函数用于在早期初始化阶段设置页表。
+ * 这个函数主要目的是为'fixmap'（固定映射）设置页表项，
+ * 它是在系统启动早期，内存管理尚未完全启动时使用的。
+ *
+ * @param p4dp 指向四级页表（p4d）的指针。
+ * @param addr 需要设置映射的地址。
+ * @param end 地址的结束值，标识映射的范围。
+ *
+ * 注：此函数依赖于配置项CONFIG_PGTABLE_LEVELS和CONFIG_ARM64_16K_PAGES。
+ */
 static void __init early_fixmap_init_pud(p4d_t *p4dp, unsigned long addr,
 					 unsigned long end)
 {
+	/* 读取一次*p4dp，保证原子性 */
 	p4d_t p4d = READ_ONCE(*p4dp);
 	pud_t *pudp;
 
+	/*
+	 * 当页表级别大于3且当前p4d项不是无效项，并且p4d项的物理地址不等于bm_pud的物理地址时，
+	 * 检查是否启用了16k页配置。这个条件判断是为了确保在特定的页表配置下正确处理页表项。
+	 */
 	if (CONFIG_PGTABLE_LEVELS > 3 && !p4d_none(p4d) &&
 	    p4d_page_paddr(p4d) != __pa_symbol(bm_pud)) {
+		/*
+		 * 如果上述条件满足，但没有启用16k页配置，则触发BUG。
+		 * 这个条件不应该在没有16k页配置的情况下被满足，
+		 * 因此这里用BUG_ON宏来断言这种情况不应该发生。
+		 */
 		/*
 		 * We only end up here if the kernel mapping and the fixmap
 		 * share the top level pgd entry, which should only happen on
@@ -82,9 +135,17 @@ static void __init early_fixmap_init_pud(p4d_t *p4dp, unsigned long addr,
 		BUG_ON(!IS_ENABLED(CONFIG_ARM64_16K_PAGES));
 	}
 
+	/*
+	 * 如果p4d项是无效项，则填充*p4dp，将其设置为指向bm_pud页目录的物理地址，
+	 * 表示这是一个有效的页目录项。
+	 */
 	if (p4d_none(p4d))
 		__p4d_populate(p4dp, __pa_symbol(bm_pud), P4D_TYPE_TABLE);
 
+	/*
+	 * 计算出当前地址在三级页表（pud）中的偏移地址，并调用early_fixmap_init_pmd函数
+	 * 继续初始化下一级页表。
+	 */
 	pudp = pud_offset_kimg(p4dp, addr);
 	early_fixmap_init_pmd(pudp, addr, end);
 }
@@ -95,14 +156,39 @@ static void __init early_fixmap_init_pud(p4d_t *p4dp, unsigned long addr,
  * lm_alias so __p*d_populate functions must be used to populate with the
  * physical address from __pa_symbol.
  */
+/*
+ * 注意：以下函数（p*d_populate）内部会隐式调用virt_to_phys转换，
+ * 因此不能直接应用于内核符号（如bm_p*d）。
+ * 由于当前函数调用发生得过早，无法使用lm_alias机制，
+ * 必须使用__p*d_populate系列函数，以从__pa_symbol获取物理地址并填充。
+ */
+/**
+ * early_fixmap_init - 早期固件初始化
+ *
+ * 描述:
+ * 该函数用于在系统启动早期阶段初始化固件映射。它主要负责将一段特定的
+ * 物理地址空间映射到内核虚拟地址空间中，以便内核可以直接访问这些物理
+ * 地址上的固件信息。这对于在系统启动时进行硬件初始化和配置非常关键。
+ *
+ * 参数:
+ * 无
+ *
+ * 返回值:
+ * 无
+ */
 void __init early_fixmap_init(void)
 {
+	// 定义固件映射起始地址
 	unsigned long addr = FIXADDR_TOT_START;
+	// 定义固件映射结束地址
 	unsigned long end = FIXADDR_TOP;
 
+	// 获取起始地址的页全局目录项
 	pgd_t *pgdp = pgd_offset_k(addr);
+	// 获取起始地址的页上级目录项
 	p4d_t *p4dp = p4d_offset(pgdp, addr);
 
+	// 调用辅助函数进行页目录初始化，完成固件的虚拟地址映射
 	early_fixmap_init_pud(p4dp, addr, end);
 }
 

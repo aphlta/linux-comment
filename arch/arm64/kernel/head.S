@@ -86,6 +86,19 @@
 	 *  x25        primary_entry() .. start_kernel()        supported VA size
 	 *  x28        create_idmap()                           callee preserved temp register
 	 */
+     /*
+      * 以下是在主要低级引导路径中保存的通用目的寄存器：
+      *
+      *  寄存器   范围                              用途
+      *  x19      primary_entry() .. start_kernel()    标记我们是否与MMU一起进入
+      *  x20      primary_entry() .. __primary_switch()  CPU引导模式
+      *  x21      primary_entry() .. start_kernel()    引导时传递的FDT指针
+      *  x22      create_idmap() .. start_kernel()     DT blob的ID映射VA
+      *  x23      primary_entry() .. start_kernel()    物理对齐/KASLR偏移
+      *  x24      __primary_switch()                  线性映射KASLR种子
+      *  x25      primary_entry() .. start_kernel()    支持的VA大小
+      *  x28      create_idmap()                      被调用者保存的临时寄存器
+      */
 SYM_CODE_START(primary_entry)
 	bl	record_mmu_state
 	bl	preserve_boot_args

@@ -556,34 +556,55 @@ failed:
  * Allocate the accumulated non-linear sections, allocate a mem_map
  * for each and record the physical to section mapping.
  */
+/**
+ * sparse_init - 初始化稀疏内存映射
+ *
+ * 描述：此函数用于初始化系统的稀疏内存映射。它主要通过遍历所有物理内存块，
+ *       根据其节点ID将它们分组，然后初始化每个节点的内存映射。
+ */
 void __init sparse_init(void)
 {
+	// 定义物理内存块的结束和开始页号，以及用于计数的变量
 	unsigned long pnum_end, pnum_begin, map_count = 1;
 	int nid_begin;
 
+	// 调用函数以获取当前系统的内存块信息
 	memblocks_present();
 
+	// 获取系统中第一个在线的内存块的页号
 	pnum_begin = first_present_section_nr();
+	// 获取第一个内存块所在的NUMA节点ID
 	nid_begin = sparse_early_nid(__nr_to_section(pnum_begin));
 
+	// 设置页块顺序，用于支持可变大小的HUGE TLB页
 	/* Setup pageblock_order for HUGETLB_PAGE_SIZE_VARIABLE */
 	set_pageblock_order();
 
+	// 遍历所有在线的内存块，从第二个开始
 	for_each_present_section_nr(pnum_begin + 1, pnum_end) {
+		// 获取当前内存块所在的NUMA节点ID
 		int nid = sparse_early_nid(__nr_to_section(pnum_end));
 
+		// 如果当前内存块和第一个内存块在同一NUMA节点上
 		if (nid == nid_begin) {
+			// 计数加一，表示同一节点上的内存块数
 			map_count++;
+			// 继续遍历下一个内存块
 			continue;
 		}
+		// 初始化NUMA节点的内存映射，覆盖从pnum_begin到pnum_end-1的内存块
 		/* Init node with sections in range [pnum_begin, pnum_end) */
 		sparse_init_nid(nid_begin, pnum_begin, pnum_end, map_count);
+		// 更新开始页号和节点ID为当前内存块的值
 		nid_begin = nid;
 		pnum_begin = pnum_end;
+		// 重置计数
 		map_count = 1;
 	}
+	// 初始化最后一个NUMA节点的内存映射
 	/* cover the last node */
 	sparse_init_nid(nid_begin, pnum_begin, pnum_end, map_count);
+	// 打印VMemmap的最后信息
 	vmemmap_populate_print_last();
 }
 

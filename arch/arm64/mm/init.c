@@ -227,29 +227,51 @@ static phys_addr_t __init max_zone_phys(unsigned int zone_bits)
 	return min(zone_mask, memblock_end_of_DRAM() - 1) + 1;
 }
 
+/**
+ * 初始化不同内存区域的大小。
+ *
+ * 该函数根据配置选项来设置不同内存区域的边界和物理地址范围。
+ * 主要处理的是 DMA 和 DMA32 内存区域，通过 ACPI 和 Device Tree 获取信息，
+ * 并根据这些信息初始化相应的内存区域。
+ */
 static void __init zone_sizes_init(void)
 {
+	// 初始化一个数组，用于存储每个内存区域的最大PFN值。
 	unsigned long max_zone_pfns[MAX_NR_ZONES]  = {0};
+	// 以下两个变量用于存储从ACPI和Device Tree获取的DMA内存区域信息，可能未使用。
 	unsigned int __maybe_unused acpi_zone_dma_bits;
 	unsigned int __maybe_unused dt_zone_dma_bits;
+	// 存储32位DMA物理地址的上限，用于计算DMA32区域的大小。
 	phys_addr_t __maybe_unused dma32_phys_limit = max_zone_phys(32);
 
+	// 如果配置了ZONE_DMA选项，则根据ACPI和Device Tree信息初始化DMA内存区域。
 #ifdef CONFIG_ZONE_DMA
 	acpi_zone_dma_bits = fls64(acpi_iort_dma_get_max_cpu_address());
 	dt_zone_dma_bits = fls64(of_dma_get_max_cpu_address(NULL));
+	// 确保DMA内存区域不会超过32位地址空间的限制。
 	zone_dma_bits = min3(32U, dt_zone_dma_bits, acpi_zone_dma_bits);
 	arm64_dma_phys_limit = max_zone_phys(zone_dma_bits);
+	// 计算并存储DMA区域的最大PFN值。
 	max_zone_pfns[ZONE_DMA] = PFN_DOWN(arm64_dma_phys_limit);
 #endif
+
+	// 如果配置了ZONE_DMA32选项，则初始化DMA32内存区域。
 #ifdef CONFIG_ZONE_DMA32
+	// 计算并存储DMA32区域的最大PFN值。
 	max_zone_pfns[ZONE_DMA32] = PFN_DOWN(dma32_phys_limit);
+	// 如果之前没有设置64位DMA物理地址上限，则将其设置为DMA32的物理地址上限。
 	if (!arm64_dma_phys_limit)
 		arm64_dma_phys_limit = dma32_phys_limit;
 #endif
+
+	// 如果没有通过配置设置64位DMA物理地址上限，则默认使用整个物理地址空间。
 	if (!arm64_dma_phys_limit)
 		arm64_dma_phys_limit = PHYS_MASK + 1;
+
+	// 计算并存储正常内存区域的最大PFN值。
 	max_zone_pfns[ZONE_NORMAL] = max_pfn;
 
+	// 根据计算出的最大PFN值初始化内存区域。
 	free_area_init(max_zone_pfns);
 }
 
@@ -411,20 +433,36 @@ void __init arm64_memblock_init(void)
 	high_memory = __va(memblock_end_of_DRAM() - 1) + 1;
 }
 
+/**
+ * bootmem_init函数是Linux内核初始化过程中的一部分，用于初始化内核的内存管理系统。
+ * 它主要负责设置内存框架、预留特定内存区域、初始化NUMA架构，并为大页面内存和DMA预留内存区域做准备。
+ */
 void __init bootmem_init(void)
 {
+	// 定义变量min和max，用于记录内存块的起始和结束页框号码
 	unsigned long min, max;
 
+	// 获取DRAM的起始页框号码，并对结果进行页框号码向上取整
 	min = PFN_UP(memblock_start_of_DRAM());
+	// 获取DRAM的结束页框号码，并对结果进行页框号码向下取整
 	max = PFN_DOWN(memblock_end_of_DRAM());
 
+	// 在min和max指定的地址范围内执行早期内存测试
 	early_memtest(min << PAGE_SHIFT, max << PAGE_SHIFT);
 
+	// 设置最大页框号码和最低内存区域的页框号码
 	max_pfn = max_low_pfn = max;
+	// 设置最低内存区域的起始页框号码
 	min_low_pfn = min;
 
+	// 初始化NUMA架构相关的内存布局
 	arch_numa_init();
 
+	// 以下代码块解释了为什么要在arch_numa_init之后调用arm64_hugetlb_cma_reserve
+	/*
+		* 必须在arch_numa_init()之后执行，因为arch_numa_init()会调用numa_init()来初始化node_online_map，
+		* 而node_online_map在hugetlb_cma_reserve()中被用于根据在线节点分配所需的CMA大小。
+		*/
 	/*
 	 * must be done after arch_numa_init() which calls numa_init() to
 	 * initialize node_online_map that gets used in hugetlb_cma_reserve()
@@ -434,28 +472,41 @@ void __init bootmem_init(void)
 	arm64_hugetlb_cma_reserve();
 #endif
 
+	// 为每个NUMA节点预留DMA连续内存区域
 	dma_pernuma_cma_reserve();
 
+	// 预留KVM hypervisor所需的内存区域
 	kvm_hyp_reserve();
 
+	/*
+		* sparse_init()尝试从memblock分配内存，因此必须在固定的预留之后执行
+		*/
 	/*
 	 * sparse_init() tries to allocate memory from memblock, so must be
 	 * done after the fixed reservations
 	 */
 	sparse_init();
+	// 初始化内存区域大小信息
 	zone_sizes_init();
 
+	/*
+		* 在arm64_dma_phys_limit被初始化后，预留CMA区域
+		*/
 	/*
 	 * Reserve the CMA area after arm64_dma_phys_limit was initialised.
 	 */
 	dma_contiguous_reserve(arm64_dma_phys_limit);
 
 	/*
+		* request_standard_resources()依赖于crashkernel内存被预留，因此在这里执行
+		*/
+	/*
 	 * request_standard_resources() depends on crashkernel's memory being
 	 * reserved, so do it here.
 	 */
 	reserve_crashkernel();
 
+	// 输出所有内存块信息
 	memblock_dump_all();
 }
 

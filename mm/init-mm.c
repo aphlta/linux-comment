@@ -48,9 +48,24 @@ struct mm_struct init_mm = {
 	INIT_MM_CONTEXT(init_mm)
 };
 
+/**
+ * 初始化内存管理模块的基础地址信息。
+ *
+ * 该函数的作用是将启动代码段的起始地址、结束地址、数据段的结束地址
+ * 以及程序堆的结束地址（brk）赋值给内存管理模块（init_mm）的相应字段。
+ * 这些地址信息对于内存管理模块来说至关重要，它们被用于内存的分配与管理，
+ * 以及对程序的内存使用情况进行监控和优化。
+ *
+ * @param start_code 程序代码段的起始地址。
+ * @param end_code 程序代码段的结束地址。
+ * @param end_data 程序数据段的结束地址。
+ * @param brk 程序堆的结束地址。
+ */
 void setup_initial_init_mm(void *start_code, void *end_code,
 			   void *end_data, void *brk)
 {
+    // 将传入的代码段起始地址、结束地址、数据段结束地址和堆结束地址
+    // 赋值给init_mm结构体的相应字段。
 	init_mm.start_code = (unsigned long)start_code;
 	init_mm.end_code = (unsigned long)end_code;
 	init_mm.end_data = (unsigned long)end_data;

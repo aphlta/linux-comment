@@ -5646,9 +5646,17 @@ static void __build_all_zonelists(void *data)
 	local_irq_restore(flags);
 }
 
+/**
+ * 初始化所有节点列表
+ *
+ * 该函数负责构建用于系统初始化的节点列表，并为每个CPU初始化引导页集。
+ * 它在系统启动早期阶段使用，为每个CPU分配初始的页集，这些页集将在CPU
+ * 引导时使用。实际的每CPU分配器将在稍后阶段初始化。
+ */
 static noinline void __init
 build_all_zonelists_init(void)
 {
+	// 遍历系统中所有可能的CPU
 	int cpu;
 
 	__build_all_zonelists(NULL);
@@ -5667,9 +5675,13 @@ build_all_zonelists_init(void)
 	 * (a chicken-egg dilemma).
 	 */
 	for_each_possible_cpu(cpu)
+		// 初始化每个CPU的引导页集
 		per_cpu_pages_init(&per_cpu(boot_pageset, cpu), &per_cpu(boot_zonestats, cpu));
 
+	// 验证节点列表的正确构建
 	mminit_verify_zonelist();
+
+	// 初始化当前允许的CPU集
 	cpuset_init_current_mems_allowed();
 }
 
@@ -5679,18 +5691,37 @@ build_all_zonelists_init(void)
  * __ref due to call of __init annotated helper build_all_zonelists_init
  * [protected by SYSTEM_BOOTING].
  */
+/**
+ * 构建所有节点的zonelist。
+ *
+ * 该函数根据系统当前状态构建zonelist。如果系统正在启动，则调用初始化函数；
+ * 否则，调用实际构建函数，并刷新cpuset。
+ *
+ * 参数:
+ * pgdat - 指向pg_data_t结构体的指针，用于存储构建zonelist所需的信息。
+ *
+ * 返回值:
+ * 无
+ */
 void __ref build_all_zonelists(pg_data_t *pgdat)
 {
 	unsigned long vm_total_pages;
 
+	// 如果系统正在启动，调用初始化函数
 	if (system_state == SYSTEM_BOOTING) {
 		build_all_zonelists_init();
 	} else {
+		// 否则，调用实际构建函数，并在此处进行cpuset刷新操作
 		__build_all_zonelists(pgdat);
+		// cpuset刷新例程应在此处添加
 		/* cpuset refresh routine should be here */
 	}
+
+	// 获取所有区域高于高水位线的空闲页面数量
 	/* Get the number of free pages beyond high watermark in all zones. */
 	vm_total_pages = nr_free_zone_pages(gfp_zone(GFP_HIGHUSER_MOVABLE));
+
+	// 如果系统页面数量不足以支持移动性分组机制，则禁用该机制
 	/*
 	 * Disable grouping by mobility if the number of pages in the
 	 * system is too low to allow the mechanism to work. It would be
@@ -5703,11 +5734,13 @@ void __ref build_all_zonelists(pg_data_t *pgdat)
 	else
 		page_group_by_mobility_disabled = 0;
 
+	// 打印zonelist构建信息，包括节点数量、移动性分组状态和总页面数量
 	pr_info("Built %u zonelists, mobility grouping %s.  Total pages: %ld\n",
 		nr_online_nodes,
 		page_group_by_mobility_disabled ? "off" : "on",
 		vm_total_pages);
 #ifdef CONFIG_NUMA
+	// 可选：打印策略区域信息
 	pr_info("Policy zone: %s\n", zone_names[policy_zone]);
 #endif
 }
@@ -5832,17 +5865,34 @@ static void pageset_update(struct per_cpu_pages *pcp, unsigned long high,
 	WRITE_ONCE(pcp->high, high);
 }
 
+/**
+ * 初始化每个CPU的页面集合。
+ *
+ * 该函数用于在启动过程中初始化每个CPU的页面集合（per_cpu_pages）和每个CPU的区域统计信息（per_cpu_zonestat）。
+ * 它设置了初始的高水位线（high）、批处理大小（batch）和自由因子（free_factor），并初始化了各种内部数据结构，如自旋锁（lock）和列表头部（lists[pindex]）。
+ *
+ * @param pcp 指向要初始化的每个CPU页面集合的指针。
+ * @param pzstats 指向要初始化的每个CPU区域统计信息的指针。
+ */
 static void per_cpu_pages_init(struct per_cpu_pages *pcp, struct per_cpu_zonestat *pzstats)
 {
+    // 用于循环的索引变量
 	int pindex;
 
+	// 将pcp和pzstats的内存清零，确保它们处于已知的初始状态
 	memset(pcp, 0, sizeof(*pcp));
 	memset(pzstats, 0, sizeof(*pzstats));
 
+    // 初始化自旋锁，用于保护pcp数据结构的并发访问
 	spin_lock_init(&pcp->lock);
+
+    // 初始化所有页面列表的头部
 	for (pindex = 0; pindex < NR_PCP_LISTS; pindex++)
 		INIT_LIST_HEAD(&pcp->lists[pindex]);
 
+    // 设置适合启动时页面集合的高水位线和批处理值
+    // 这些值将在真正的percpu页面集合初始化过程中被更新
+    // 由于此时没有人可以访问页面集合，因此不需要像pageset_update()那样小心
 	/*
 	 * Set batch and high values safe for a boot pageset. A true percpu
 	 * pageset's initialization will update them subsequently. Here we don't
@@ -6055,14 +6105,23 @@ static int page_alloc_cpu_online(unsigned int cpu)
 	return 0;
 }
 
+/**
+ * page_alloc_init_cpuhp - 初始化CPU热插拔相关的页面分配器
+ *
+ * 该函数在系统初始化期间调用，用于设置CPU热插拔时页面分配器的处理方式。
+ * 它通过设置CPU热插拔钩子，指定在CPU上线和下线时分别调用的处理函数，
+ * 以确保页面分配器能正确地响应CPU的热插拔事件。
+ */
 void __init page_alloc_init_cpuhp(void)
 {
 	int ret;
 
+    /* 设置CPU热插拔状态，指定页面分配器在CPU上线和下线时的处理函数 */
 	ret = cpuhp_setup_state_nocalls(CPUHP_PAGE_ALLOC,
 					"mm/page_alloc:pcp",
 					page_alloc_cpu_online,
 					page_alloc_cpu_dead);
+    /* 检查设置结果，确保没有发生错误 */
 	WARN_ON(ret < 0);
 }
 

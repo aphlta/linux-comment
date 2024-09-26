@@ -290,14 +290,27 @@ u64 cpu_logical_map(unsigned int cpu)
 	return __cpu_logical_map[cpu];
 }
 
+/**
+ * 初始化架构特定的系统设置。
+ *
+ * 该函数在系统启动过程中被调用，负责根据命令行参数初始化系统内存模型，
+ * 设置机器的FDT（Flat Device Tree），初始化静态密钥，解析早期参数，设置内存块，
+ * 初始化ACPI表和启动内存管理器等关键操作。
+ *
+ * @param cmdline_p 指向系统命令行参数的指针。
+ */
 void __init __no_sanitize_address setup_arch(char **cmdline_p)
 {
+	// 设置初始内存模型。
 	setup_initial_init_mm(_stext, _etext, _edata, _end);
 
+	// 设置命令行参数。
 	*cmdline_p = boot_command_line;
 
+	// 初始化内核地址空间随机化（KASLR）。
 	kaslr_init();
 
+	// 决定是否从一开始就使用非全局映射，以避免以后的重写开销。
 	/*
 	 * If know now we are going to need KPTI then use non-global
 	 * mappings from the start, avoiding the cost of rewriting
@@ -305,11 +318,14 @@ void __init __no_sanitize_address setup_arch(char **cmdline_p)
 	 */
 	arm64_use_ng_mappings = kaslr_requires_kpti();
 
+	// 初始化早期的固定映射和I/O重映射。
 	early_fixmap_init();
 	early_ioremap_init();
 
+	// 根据FDT设置机器。
 	setup_machine_fdt(__fdt_pointer);
 
+	// 早期初始化静态密钥和解析早期参数。
 	/*
 	 * Initialise the static keys early as they may be enabled by the
 	 * cpufeature code and early parameters.
@@ -317,8 +333,10 @@ void __init __no_sanitize_address setup_arch(char **cmdline_p)
 	jump_label_init();
 	parse_early_param();
 
+	// 初始化动态SCS（System Control Space）。
 	dynamic_scs_init();
 
+	// 解除异步中止和FIQ掩码。
 	/*
 	 * Unmask asynchronous aborts and fiq after bringing up possible
 	 * earlycon. (Report possible System Errors once we can report this
@@ -326,15 +344,18 @@ void __init __no_sanitize_address setup_arch(char **cmdline_p)
 	 */
 	local_daif_restore(DAIF_PROCCTX_NOIRQ);
 
+	// 将TTBR0指向零页，避免投机性地获取新条目。
 	/*
 	 * TTBR0 is only used for the identity mapping at this stage. Make it
 	 * point to zero page to avoid speculatively fetching new entries.
 	 */
 	cpu_uninstall_idmap();
 
+	// 初始化Xen和EFI。
 	xen_early_init();
 	efi_init();
 
+	// 检查并警告内核映像对齐问题和MMU启用问题。
 	if (!efi_enabled(EFI_BOOT)) {
 		if ((u64)_text % MIN_KIMG_ALIGN)
 			pr_warn(FW_BUG "Kernel image misaligned at boot, please fix your bootloader!");
@@ -342,39 +363,54 @@ void __init __no_sanitize_address setup_arch(char **cmdline_p)
 			   FW_BUG "Booted with MMU enabled!");
 	}
 
+	// 初始化内存块。
 	arm64_memblock_init();
 
+	// 初始化分页。
 	paging_init();
 
+	// 升级ACPI表。
 	acpi_table_upgrade();
 
+	// 解析ACPI表以进行可能的启动时配置。
 	/* Parse the ACPI tables for possible boot-time configuration */
 	acpi_boot_table_init();
 
+	// 如果禁用了ACPI，则展平设备树。
 	if (acpi_disabled)
 		unflatten_device_tree();
 
+	// 初始化启动内存管理器。
 	bootmem_init();
 
+	// 初始化KASAN（Kernel Address Sanitizer）。
 	kasan_init();
 
+	// 请求标准资源。
 	request_standard_resources();
 
+	// 重置早期I/O重映射。
 	early_ioremap_reset();
 
+	// 根据ACPI状态初始化PSCI（Power State Coordination Interface）。
 	if (acpi_disabled)
 		psci_dt_init();
 	else
 		psci_acpi_init();
 
+	// 初始化引导CPU操作。
 	init_bootcpu_ops();
+
+	// 初始化SMP（对称多处理）CPU。
 	smp_init_cpus();
 	smp_build_mpidr_hash();
 
+	// 在CPU设置完毕后初始化每个CPU的随机标签种子。
 	/* Init percpu seeds for random tags after cpus are set up. */
 	kasan_init_sw_tags();
 
 #ifdef CONFIG_ARM64_SW_TTBR0_PAN
+	// 确保init_thread_info.ttbr0总是生成翻译错误。
 	/*
 	 * Make sure init_thread_info.ttbr0 always generates translation
 	 * faults in case uaccess_enable() is inadvertently called by the init
@@ -383,6 +419,7 @@ void __init __no_sanitize_address setup_arch(char **cmdline_p)
 	init_task.thread_info.ttbr0 = phys_to_ttbr(__pa_symbol(reserved_pg_dir));
 #endif
 
+	// 检查并报告违反启动协议的非零x1-x3寄存器值。
 	if (boot_args[1] || boot_args[2] || boot_args[3]) {
 		pr_err("WARNING: x1-x3 nonzero in violation of boot protocol:\n"
 			"\tx1: %016llx\n\tx2: %016llx\n\tx3: %016llx\n"
