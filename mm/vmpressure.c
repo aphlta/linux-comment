@@ -35,6 +35,16 @@
  * TODO: Make the window size depend on machine size, as we do for vmstat
  * thresholds. Currently we set it to 512 pages (2MB for 4KB pages).
  */
+/*
+ * 窗口大小（vmpressure_win）是指在尝试分析扫描/回收比率之前扫描的页面数量。
+ * 因此，窗口用作“低”级别通知的速率限制调节器，并且还用于计算中等/关键级别的平均比率。
+ * 使用较小的窗口大小可能会导致很多误报，但窗口大小过大则会延迟通知。
+ *
+ * 由于 vmscan 回收逻辑以 SWAP_CLUSTER_MAX 的倍数处理块，因此将窗口大小设置为相同也是合理的。
+ *
+ * TODO: 根据机器大小调整窗口大小，就像我们为 vmstat 阈值所做的那样。
+ * 当前我们将窗口大小设置为 512 个页面（对于 4KB 页面大小为 2MB）。
+ */
 static const unsigned long vmpressure_win = SWAP_CLUSTER_MAX * 16;
 
 /*

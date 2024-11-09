@@ -110,6 +110,9 @@ struct scan_control {
 	unsigned int may_swap:1;
 
 	/* Proactive reclaim invoked by userspace through memory.reclaim */
+	/*
+	* 主动回收功能，由用户空间通过 memory.reclaim 调用触发
+	*/
 	unsigned int proactive:1;
 
 	/*
@@ -436,12 +439,18 @@ static bool cgroup_reclaim(struct scan_control *sc)
 }
 
 /*
- * Returns true for reclaim on the root cgroup. This is true for direct
- * allocator reclaim and reclaim through cgroup interfaces on the root cgroup.
+ * 判断是否在根 cgroup 上进行回收操作。
+ * 此函数在直接分配器回收或通过根 cgroup 接口进行回收时返回 true。
+ *
+ * 参数:
+ * sc - 指向 scan_control 结构的指针，包含目标内存 cgroup 信息。
+ *
+ * 返回值:
+ * 如果目标内存 cgroup 是根 cgroup 或者没有指定目标内存 cgroup，则返回 true；否则返回 false。
  */
 static bool root_reclaim(struct scan_control *sc)
 {
-	return !sc->target_mem_cgroup || mem_cgroup_is_root(sc->target_mem_cgroup);
+    return !sc->target_mem_cgroup || mem_cgroup_is_root(sc->target_mem_cgroup);
 }
 
 /**
@@ -3282,24 +3291,42 @@ unsigned long min_seq[ANON_AND_FILE] = {			\
 #define get_memcg_gen(seq)	((seq) % MEMCG_NR_GENS)
 #define get_memcg_bin(bin)	((bin) % MEMCG_NR_BINS)
 
+/**
+ * 获取指定内存控制组和节点ID的LRU向量
+ *
+ * 此函数旨在检索与特定内存控制组（memcg）和节点ID（nid）关联的LRU向量（lruvec）结构
+ * LRU向量用于管理内存页面的最近最少使用（LRU）列表在内存控制组和节点层面的整合
+ *
+ * @param memcg 内存控制组指针，标识了哪个内存控制组的LRU向量需要被获取如果为NULL，表示获取全局LRU向量
+ * @param nid 节点ID，标识了在哪个内存节点上获取LRU向量
+ * @return 返回指向相应LRU向量的指针
+ */
 static struct lruvec *get_lruvec(struct mem_cgroup *memcg, int nid)
 {
-	struct pglist_data *pgdat = NODE_DATA(nid);
+    // 获取指定节点的页列表数据结构
+    struct pglist_data *pgdat = NODE_DATA(nid);
 
 #ifdef CONFIG_MEMCG
-	if (memcg) {
-		struct lruvec *lruvec = &memcg->nodeinfo[nid]->lruvec;
+    // 如果内存控制组功能启用且传入了有效的内存控制组指针
+    if (memcg) {
+        // 获取内存控制组特定节点上的LRU向量
+        struct lruvec *lruvec = &memcg->nodeinfo[nid]->lruvec;
 
-		/* see the comment in mem_cgroup_lruvec() */
-		if (!lruvec->pgdat)
-			lruvec->pgdat = pgdat;
+        // 如果LRU向量的pgdat字段未初始化，将其指向当前节点的页列表数据结构
+        // 这与mem_cgroup_lruvec()函数中的逻辑相呼应
+        if (!lruvec->pgdat)
+            lruvec->pgdat = pgdat;
 
-		return lruvec;
-	}
+        // 返回内存控制组级别的LRU向量
+        return lruvec;
+    }
 #endif
-	VM_WARN_ON_ONCE(!mem_cgroup_disabled());
+    // 如果内存控制组功能未启用或传入的内存控制组指针为NULL
+    // 确保在该情况下发出警告
+    VM_WARN_ON_ONCE(!mem_cgroup_disabled());
 
-	return &pgdat->__lruvec;
+    // 返回全局（节点级别）的LRU向量
+    return &pgdat->__lruvec;
 }
 
 static int get_swappiness(struct lruvec *lruvec, struct scan_control *sc)
@@ -3426,45 +3453,74 @@ static void reset_bloom_filter(struct lruvec *lruvec, unsigned long seq)
  *                          mm_struct list
  ******************************************************************************/
 
+/**
+ * 获取内存列表
+ *
+ * 此函数旨在提供对内存列表的访问，该列表用于在内存管理中实现LRU（最近最少使用）算法
+ * 它根据是否配置了内存组（memcg）来决定返回哪个内存列表
+ *
+ * @param memcg 内存组指针，用于在启用了内存组管理的情况下确定特定的内存列表
+ * @return 返回适当的lru_gen_mm_list结构体指针
+ */
 static struct lru_gen_mm_list *get_mm_list(struct mem_cgroup *memcg)
 {
+    // 定义一个静态的内存列表结构体，初始化其fifo链表头和锁
 	static struct lru_gen_mm_list mm_list = {
 		.fifo = LIST_HEAD_INIT(mm_list.fifo),
 		.lock = __SPIN_LOCK_UNLOCKED(mm_list.lock),
 	};
 
+    // 如果配置了内存组且传入的内存组指针不为空，则返回该内存组的内存列表
 #ifdef CONFIG_MEMCG
 	if (memcg)
 		return &memcg->mm_list;
 #endif
+
+    // 如果未配置内存组，但尝试传入了一个内存组指针，发出警告
 	VM_WARN_ON_ONCE(!mem_cgroup_disabled());
 
+    // 返回全局静态内存列表
 	return &mm_list;
 }
 
+/**
+ * 将mm_struct结构体添加到LRU生成器的MM列表中。
+ * 此函数用于将一个地址空间（mm_struct）添加到与其关联的内存控制组（mem_cgroup）中的LRU生成器列表。
+ * 它确保了在并发访问情况下对列表操作的原子性，并为后续的LRU生成器扫描创建了必要的数据结构链接。
+ *
+ * @param mm 指向要添加到LRU生成器MM列表的地址空间结构体。
+ */
 void lru_gen_add_mm(struct mm_struct *mm)
 {
 	int nid;
+	// 从地址空间中获取对应的内存控制组
 	struct mem_cgroup *memcg = get_mem_cgroup_from_mm(mm);
+	// 获取内存控制组中的MM列表
 	struct lru_gen_mm_list *mm_list = get_mm_list(memcg);
 
+	// 检查地址空间是否已经不在其他列表中
 	VM_WARN_ON_ONCE(!list_empty(&mm->lru_gen.list));
-#ifdef CONFIG_MEMCG
+	#ifdef CONFIG_MEMCG
+	// 在内存控制组配置下，设置地址空间的内存控制组指针
 	VM_WARN_ON_ONCE(mm->lru_gen.memcg);
 	mm->lru_gen.memcg = memcg;
-#endif
+	#endif
+	// 锁定MM列表以进行原子操作
 	spin_lock(&mm_list->lock);
 
+	// 遍历所有内存节点，更新LRU向量中的尾指针
 	for_each_node_state(nid, N_MEMORY) {
 		struct lruvec *lruvec = get_lruvec(memcg, nid);
 
-		/* the first addition since the last iteration */
+		// 如果这是自上次迭代以来的首次添加，则更新尾指针
 		if (lruvec->mm_state.tail == &mm_list->fifo)
 			lruvec->mm_state.tail = &mm->lru_gen.list;
 	}
 
+	// 将地址空间添加到MM列表的尾部
 	list_add_tail(&mm->lru_gen.list, &mm_list->fifo);
 
+	// 解锁MM列表完成操作
 	spin_unlock(&mm_list->lock);
 }
 
@@ -3507,31 +3563,47 @@ void lru_gen_del_mm(struct mm_struct *mm)
 }
 
 #ifdef CONFIG_MEMCG
+/**
+ * 将mm_struct关联的内存组从一个cgroup迁移到另一个cgroup
+ * 此函数用于在内存重组期间更新mm_struct的内存组关联
+ *
+ * @param mm 指向mm_struct的指针，代表一个地址空间
+ */
 void lru_gen_migrate_mm(struct mm_struct *mm)
 {
+	// 指向内存控制组的指针
 	struct mem_cgroup *memcg;
+	// 获取拥有该mm_struct的任务结构体指针
 	struct task_struct *task = rcu_dereference_protected(mm->owner, true);
 
+	// 确保任务的mm_struct与参数mm一致
 	VM_WARN_ON_ONCE(task->mm != mm);
+	// 确保在持有分配锁的情况下执行此操作
 	lockdep_assert_held(&task->alloc_lock);
 
 	/* for mm_update_next_owner() */
+	// 如果内存控制组功能被禁用，则直接返回
 	if (mem_cgroup_disabled())
 		return;
 
-	/* migration can happen before addition */
+	// 如果mm_struct尚未关联任何内存组，则直接返回
 	if (!mm->lru_gen.memcg)
 		return;
 
+	// 锁定RCU以安全地读取内存控制组
 	rcu_read_lock();
 	memcg = mem_cgroup_from_task(task);
 	rcu_read_unlock();
+	// 如果当前内存组与mm_struct已关联的内存组相同，则直接返回
 	if (memcg == mm->lru_gen.memcg)
 		return;
 
+	// 确保mm_struct已加入LRU列表
 	VM_WARN_ON_ONCE(list_empty(&mm->lru_gen.list));
 
+	// 从当前LRU列表中删除mm_struct
 	lru_gen_del_mm(mm);
+	// 将mm_struct添加到新的内存组的LRU列表中
 	lru_gen_add_mm(mm);
 }
 #endif
@@ -3561,30 +3633,55 @@ static void reset_mm_stats(struct lruvec *lruvec, struct lru_gen_mm_walk *walk, 
 	}
 }
 
+/**
+ * 判断是否应该跳过对特定内存管理对象的扫描
+ *
+ * 此函数用于决定在LRU生成算法的内存扫描过程中，是否应该跳过给定的内存管理对象
+ * 它通过检查内存管理对象的位图标记和其页面数量来做出决策
+ *
+ * @param mm 内存管理对象指针，表示待检查的进程地址空间
+ * @param walk LRU生成算法的内存遍历上下文，包含遍历的控制信息
+ * @return 返回true表示应该跳过该内存管理对象的扫描，返回false表示不应该跳过
+ */
 static bool should_skip_mm(struct mm_struct *mm, struct lru_gen_mm_walk *walk)
 {
-	int type;
-	unsigned long size = 0;
-	struct pglist_data *pgdat = lruvec_pgdat(walk->lruvec);
-	int key = pgdat->node_id % BITS_PER_TYPE(mm->lru_gen.bitmap);
+    int type;
+    unsigned long size = 0;
+    struct pglist_data *pgdat = lruvec_pgdat(walk->lruvec);
+    int key = pgdat->node_id % BITS_PER_TYPE(mm->lru_gen.bitmap);
 
-	if (!walk->force_scan && !test_bit(key, &mm->lru_gen.bitmap))
-		return true;
+    // 如果不需要强制扫描且当前内存管理对象的位图中对应位未设置，则跳过
+    if (!walk->force_scan && !test_bit(key, &mm->lru_gen.bitmap))
+        return true;
 
-	clear_bit(key, &mm->lru_gen.bitmap);
+    // 清除位图中的对应位，表示已访问过
+    clear_bit(key, &mm->lru_gen.bitmap);
 
-	for (type = !walk->can_swap; type < ANON_AND_FILE; type++) {
-		size += type ? get_mm_counter(mm, MM_FILEPAGES) :
-			       get_mm_counter(mm, MM_ANONPAGES) +
-			       get_mm_counter(mm, MM_SHMEMPAGES);
-	}
+    // 根据内存类型计算总大小，仅考虑文件页面或匿名页面及共享内存页面
+    for (type = !walk->can_swap; type < ANON_AND_FILE; type++) {
+        size += type ? get_mm_counter(mm, MM_FILEPAGES) :
+               get_mm_counter(mm, MM_ANONPAGES) +
+               get_mm_counter(mm, MM_SHMEMPAGES);
+    }
 
-	if (size < MIN_LRU_BATCH)
-		return true;
+    // 如果页面总大小小于最小的LRU批量大小，则跳过
+    if (size < MIN_LRU_BATCH)
+        return true;
 
-	return !mmget_not_zero(mm);
+    // 如果无法安全地增加内存管理对象的引用计数，则跳过
+    return !mmget_not_zero(mm);
 }
 
+/**
+ * 遍历与给定 LRU 向量关联的内存结构 (mm_struct) 列表。
+ * 此函数设计用于遍历 LRU（最近最少使用）代中的内存结构，
+ * 根据需要对每个内存结构执行特定操作。它使用序列号来确保即使在内存结构被添加或删除时也能一致地遍历列表。
+ *
+ * @param lruvec 指向 LRU 向量的指针，表示按访问模式分组的一组页面。
+ * @param walk 指向 lru_gen_mm_walk 结构的指针，包含遍历所需的状态信息。
+ * @param iter 指向当前遍历到的 mm_struct 结构的指针的指针。
+ * @return 返回一个布尔值，指示是否已到达列表的末尾。
+ */
 static bool iterate_mm_list(struct lruvec *lruvec, struct lru_gen_mm_walk *walk,
 			    struct mm_struct **iter)
 {
@@ -3596,14 +3693,10 @@ static bool iterate_mm_list(struct lruvec *lruvec, struct lru_gen_mm_walk *walk,
 	struct lru_gen_mm_state *mm_state = &lruvec->mm_state;
 
 	/*
-	 * mm_state->seq is incremented after each iteration of mm_list. There
-	 * are three interesting cases for this page table walker:
-	 * 1. It tries to start a new iteration with a stale max_seq: there is
-	 *    nothing left to do.
-	 * 2. It started the next iteration: it needs to reset the Bloom filter
-	 *    so that a fresh set of PTE tables can be recorded.
-	 * 3. It ended the current iteration: it needs to reset the mm stats
-	 *    counters and tell its caller to increment max_seq.
+	 * mm_state->seq 在每次遍历 mm_list 后递增。对于此页表遍历器，有三种有趣的情况：
+	 * 1. 它尝试以过期的 max_seq 开始新的遍历：没有什么可做的。
+	 * 2. 它开始下一次遍历：需要重置布隆过滤器，以便记录一组新的 PTE 表。
+	 * 3. 它结束当前遍历：需要重置 mm 统计计数器，并告诉调用者递增 max_seq。
 	 */
 	spin_lock(&mm_list->lock);
 
@@ -3626,7 +3719,7 @@ static bool iterate_mm_list(struct lruvec *lruvec, struct lru_gen_mm_walk *walk,
 			break;
 		}
 
-		/* force scan for those added after the last iteration */
+		/* 强制扫描在上次遍历后添加的项 */
 		if (!mm_state->tail || mm_state->tail == mm_state->head) {
 			mm_state->tail = mm_state->head->next;
 			walk->force_scan = true;
@@ -3652,7 +3745,6 @@ done:
 
 	return last;
 }
-
 static bool iterate_mm_list_nowalk(struct lruvec *lruvec, unsigned long max_seq)
 {
 	bool success = false;
@@ -3762,8 +3854,11 @@ static void reset_ctrl_pos(struct lruvec *lruvec, int type, bool carryover)
 static bool positive_ctrl_err(struct ctrl_pos *sp, struct ctrl_pos *pv)
 {
 	/*
-	 * Return true if the PV has a limited number of refaults or a lower
-	 * refaulted/total than the SP.
+	 * 判断过程变量 (PV) 是否具有有限的重故障次数或比设定值 (SP) 更低的重故障率。
+	 *
+	 * @param sp 指向设定值结构的指针，表示期望的控制位置。
+	 * @param pv 指向过程变量结构的指针，表示当前的位置。
+	 * @return 如果 PV 具有有限的重故障次数或比 SP 更低的重故障率，则返回 true。
 	 */
 	return pv->refaulted < MIN_LRU_BATCH ||
 	       pv->refaulted * (sp->total + MIN_LRU_BATCH) * sp->gain <=
@@ -4076,6 +4171,18 @@ restart:
 }
 
 #if defined(CONFIG_TRANSPARENT_HUGEPAGE) || defined(CONFIG_ARCH_HAS_NONLEAF_PMD_YOUNG)
+/**
+ * walk_pmd_range_locked - 遍历并处理一个二级页表（PMD）范围内的页表项
+ * @pud: 指向一级页表（PUD）的指针
+ * @addr: 起始虚拟地址
+ * @vma: 指向虚拟内存区域的结构体
+ * @args: 指向页表遍历的参数结构体
+ * @bitmap: 位图数组，用于记录需要处理的页表项
+ * @first: 指向第一个需要处理的页表项的地址
+ *
+ * 此函数主要用于遍历二级页表（PMD）范围内的页表项，并根据需要对其进行处理。
+ * 它会根据传入的参数和位图数组来确定需要处理哪些页表项，并对这些页表项进行年轻位清除、脏位处理等操作。
+ */
 static void walk_pmd_range_locked(pud_t *pud, unsigned long addr, struct vm_area_struct *vma,
 				  struct mm_walk *args, unsigned long *bitmap, unsigned long *first)
 {
@@ -4087,67 +4194,81 @@ static void walk_pmd_range_locked(pud_t *pud, unsigned long addr, struct vm_area
 	struct pglist_data *pgdat = lruvec_pgdat(walk->lruvec);
 	int old_gen, new_gen = lru_gen_from_seq(walk->max_seq);
 
+	// 检查 PUD 是否是叶子节点，如果是则发出警告
 	VM_WARN_ON_ONCE(pud_leaf(*pud));
 
-	/* try to batch at most 1+MIN_LRU_BATCH+1 entries */
+	/* 尝试批量处理最多 1+MIN_LRU_BATCH+1 个条目 */
 	if (*first == -1) {
 		*first = addr;
 		bitmap_zero(bitmap, MIN_LRU_BATCH);
 		return;
 	}
 
+	// 计算当前地址在位图中的索引
 	i = addr == -1 ? 0 : pmd_index(addr) - pmd_index(*first);
 	if (i && i <= MIN_LRU_BATCH) {
 		__set_bit(i - 1, bitmap);
 		return;
 	}
 
+	// 获取指向 PMD 的指针
 	pmd = pmd_offset(pud, *first);
 
+	// 获取 PMD 锁指针
 	ptl = pmd_lockptr(args->mm, pmd);
 	if (!spin_trylock(ptl))
 		goto done;
 
+	// 进入懒惰 MMU 模式
 	arch_enter_lazy_mmu_mode();
 
 	do {
 		unsigned long pfn;
 		struct folio *folio;
 
-		/* don't round down the first address */
+		/* 不对第一个地址进行向下取整 */
 		addr = i ? (*first & PMD_MASK) + i * PMD_SIZE : *first;
 
+		// 获取 PMD 的物理帧号
 		pfn = get_pmd_pfn(pmd[i], vma, addr);
 		if (pfn == -1)
 			goto next;
 
+		// 如果 PMD 不是大页
 		if (!pmd_trans_huge(pmd[i])) {
 			if (should_clear_pmd_young())
 				pmdp_test_and_clear_young(vma, addr, pmd + i);
 			goto next;
 		}
 
+		// 获取 folio
 		folio = get_pfn_folio(pfn, memcg, pgdat, walk->can_swap);
 		if (!folio)
 			goto next;
 
+		// 清除 PMD 的年轻位
 		if (!pmdp_test_and_clear_young(vma, addr, pmd + i))
 			goto next;
 
+		// 更新统计信息
 		walk->mm_stats[MM_LEAF_YOUNG]++;
 
+		// 处理脏位
 		if (pmd_dirty(pmd[i]) && !folio_test_dirty(folio) &&
 		    !(folio_test_anon(folio) && folio_test_swapbacked(folio) &&
 		      !folio_test_swapcache(folio)))
 			folio_mark_dirty(folio);
 
+		// 更新 folio 的代数
 		old_gen = folio_update_gen(folio, new_gen);
 		if (old_gen >= 0 && old_gen != new_gen)
 			update_batch_size(walk, folio, old_gen, new_gen);
 next:
+		// 查找下一个需要处理的位图索引
 		i = i > MIN_LRU_BATCH ? 0 : find_next_bit(bitmap, MIN_LRU_BATCH, i) + 1;
 	} while (i <= MIN_LRU_BATCH);
 
+	// 离开懒惰 MMU 模式
 	arch_leave_lazy_mmu_mode();
 	spin_unlock(ptl);
 done:
@@ -4160,6 +4281,16 @@ static void walk_pmd_range_locked(pud_t *pud, unsigned long addr, struct vm_area
 }
 #endif
 
+/**
+ * walk_pmd_range - 遍历一个PMD范围内的页表
+ * @pud: PUD页表指针
+ * @start: 起始地址
+ * @end: 结束地址
+ * @args: 遍历参数结构体指针
+ *
+ * 该函数负责在一个PMD范围内遍历页表，主要目的是为了统计和处理页表项。
+ * 它通过无锁方式访问PMD表项，并在必要时加锁以清除访问位。
+ */
 static void walk_pmd_range(pud_t *pud, unsigned long start, unsigned long end,
 			   struct mm_walk *args)
 {
@@ -4169,79 +4300,113 @@ static void walk_pmd_range(pud_t *pud, unsigned long start, unsigned long end,
 	unsigned long addr;
 	struct vm_area_struct *vma;
 	DECLARE_BITMAP(bitmap, MIN_LRU_BATCH);
+	// 用于记录LRU批处理的位图
 	unsigned long first = -1;
+	// 记录第一个处理的PMD索引
 	struct lru_gen_mm_walk *walk = args->private;
+	  // 获取私有数据结构
 
 	VM_WARN_ON_ONCE(pud_leaf(*pud));
+	// 检查PUD是否为叶子节点
 
 	/*
-	 * Finish an entire PMD in two passes: the first only reaches to PTE
-	 * tables to avoid taking the PMD lock; the second, if necessary, takes
-	 * the PMD lock to clear the accessed bit in PMD entries.
-	 */
+		* 完成整个PMD范围的遍历分为两步：第一步仅访问PTE表以避免获取PMD锁；
+		* 第二步在必要时获取PMD锁以清除PMD条目中的访问位。
+	*/
 	pmd = pmd_offset(pud, start & PUD_MASK);
+	// 获取PMD表指针
 restart:
-	/* walk_pte_range() may call get_next_vma() */
+	/* walk_pte_range() 可能会调用 get_next_vma() */
 	vma = args->vma;
+	// 获取当前虚拟内存区域
 	for (i = pmd_index(start), addr = start; addr != end; i++, addr = next) {
 		pmd_t val = pmdp_get_lockless(pmd + i);
+		// 无锁获取PMD条目
 
 		next = pmd_addr_end(addr, end);
+		// 计算下一个地址
 
 		if (!pmd_present(val) || is_huge_zero_pmd(val)) {
 			walk->mm_stats[MM_LEAF_TOTAL]++;
+			// 统计总叶节点数
 			continue;
 		}
 
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
 		if (pmd_trans_huge(val)) {
+			// 检查是否为透明大页
 			unsigned long pfn = pmd_pfn(val);
+			// 获取物理帧号
 			struct pglist_data *pgdat = lruvec_pgdat(walk->lruvec);
+			// 获取内存节点信息
 
 			walk->mm_stats[MM_LEAF_TOTAL]++;
+			// 统计总叶节点数
 
 			if (!pmd_young(val)) {
+				// 检查是否被访问过
 				walk->mm_stats[MM_LEAF_OLD]++;
+				// 统计旧叶节点数
 				continue;
 			}
 
-			/* try to avoid unnecessary memory loads */
+			/* 尽量避免不必要的内存加载 */
 			if (pfn < pgdat->node_start_pfn || pfn >= pgdat_end_pfn(pgdat))
 				continue;
 
 			walk_pmd_range_locked(pud, addr, vma, args, bitmap, &first);
+			// 锁定PMD范围并处理
 			continue;
 		}
 #endif
 		walk->mm_stats[MM_NONLEAF_TOTAL]++;
+		// 统计非叶节点总数
 
 		if (should_clear_pmd_young()) {
+		// 检查是否需要清除年轻位
 			if (!pmd_young(val))
 				continue;
 
 			walk_pmd_range_locked(pud, addr, vma, args, bitmap, &first);
+			// 锁定PMD范围并处理
 		}
 
 		if (!walk->force_scan && !test_bloom_filter(walk->lruvec, walk->max_seq, pmd + i))
 			continue;
 
 		walk->mm_stats[MM_NONLEAF_FOUND]++;
+		// 统计找到的非叶节点数
 
 		if (!walk_pte_range(&val, addr, next, args))
+		// 处理PTE范围
 			continue;
 
 		walk->mm_stats[MM_NONLEAF_ADDED]++;
+		// 统计添加的非叶节点数
 
-		/* carry over to the next generation */
+		/* 过渡到下一代 */
 		update_bloom_filter(walk->lruvec, walk->max_seq + 1, pmd + i);
+		// 更新布隆过滤器
 	}
 
 	walk_pmd_range_locked(pud, -1, vma, args, bitmap, &first);
+	// 最终处理锁定的PMD范围
 
 	if (i < PTRS_PER_PMD && get_next_vma(PUD_MASK, PMD_SIZE, args, &start, &end))
 		goto restart;
+		// 如果还有未处理的VMA，重新开始
 }
 
+/**
+ * walk_pud_range - 遍历一个PUD范围内的页表
+ * @p4d: P4D页表指针
+ * @start: 起始地址
+ * @end: 结束地址
+ * @args: 遍历参数结构体指针
+ *
+ * 该函数负责在一个PUD范围内遍历页表，主要目的是为了统计和处理页表项。
+ * 它通过无锁方式访问PUD表项，并在必要时加锁以清除访问位。
+ */
 static int walk_pud_range(p4d_t *p4d, unsigned long start, unsigned long end,
 			  struct mm_walk *args)
 {
@@ -4250,40 +4415,53 @@ static int walk_pud_range(p4d_t *p4d, unsigned long start, unsigned long end,
 	unsigned long addr;
 	unsigned long next;
 	struct lru_gen_mm_walk *walk = args->private;
+	// 获取私有数据结构
 
 	VM_WARN_ON_ONCE(p4d_leaf(*p4d));
+	// 检查P4D是否为叶子节点
 
 	pud = pud_offset(p4d, start & P4D_MASK);
+	// 获取PUD表指针
 restart:
 	for (i = pud_index(start), addr = start; addr != end; i++, addr = next) {
 		pud_t val = READ_ONCE(pud[i]);
+		// 无锁获取PUD条目
 
 		next = pud_addr_end(addr, end);
+		// 计算下一个地址
 
 		if (!pud_present(val) || WARN_ON_ONCE(pud_leaf(val)))
+		// 检查PUD条目是否存在或是否为叶子节点
 			continue;
 
 		walk_pmd_range(&val, addr, next, args);
+		// 遍历PMD范围
 
 		if (need_resched() || walk->batched >= MAX_LRU_BATCH) {
+			// 检查是否需要调度或批处理已满
 			end = (addr | ~PUD_MASK) + 1;
+			// 更新结束地址
 			goto done;
 		}
 	}
 
 	if (i < PTRS_PER_PUD && get_next_vma(P4D_MASK, PUD_SIZE, args, &start, &end))
 		goto restart;
+	// 如果还有未处理的VMA，重新开始
 
 	end = round_up(end, P4D_SIZE);
+	// 对齐结束地址
 done:
 	if (!end || !args->vma)
+	// 检查结束条件
 		return 1;
 
 	walk->next_addr = max(end, args->vma->vm_start);
+	// 更新下一个地址
 
 	return -EAGAIN;
+	// 返回需要重试
 }
-
 static void walk_mm(struct lruvec *lruvec, struct mm_struct *mm, struct lru_gen_mm_walk *walk)
 {
 	static const struct mm_walk_ops mm_walk_ops = {
@@ -4328,22 +4506,41 @@ static void walk_mm(struct lruvec *lruvec, struct mm_struct *mm, struct lru_gen_
 	} while (err == -EAGAIN);
 }
 
+/**
+ * 设置内存走查结构体
+ *
+ * 该函数用于设置当前进程的内存回收状态中的内存走查结构体
+ * 主要处理两种情况：1) 当前进程是kswapd进程且传入了pgdat参数
+ * 2) 需要强制分配一个新的内存走查结构体
+ *
+ * @param pgdat 区域数据结构，用于指定内存区域
+ * @param force_alloc 指示是否需要强制分配新的内存走查结构体
+ * @return 返回设置的内存走查结构体指针
+ */
 static struct lru_gen_mm_walk *set_mm_walk(struct pglist_data *pgdat, bool force_alloc)
 {
+    // 获取当前进程的内存走查结构体
 	struct lru_gen_mm_walk *walk = current->reclaim_state->mm_walk;
 
+    // 如果传入了pgdat参数且当前进程是kswapd进程
 	if (pgdat && current_is_kswapd()) {
+        // 警告：如果walk不为空，则表示当前已经有内存走查结构体在使用
 		VM_WARN_ON_ONCE(walk);
 
+        // 使用pgdat的内存走查结构体
 		walk = &pgdat->mm_walk;
 	} else if (!walk && force_alloc) {
+        // 警告：如果当前进程是kswapd进程，则不应该走到这里
 		VM_WARN_ON_ONCE(current_is_kswapd());
 
+        // 分配一个新的内存走查结构体
 		walk = kzalloc(sizeof(*walk), __GFP_HIGH | __GFP_NOMEMALLOC | __GFP_NOWARN);
 	}
 
+    // 设置当前进程的内存回收状态中的内存走查结构体
 	current->reclaim_state->mm_walk = walk;
 
+    // 返回设置的内存走查结构体指针
 	return walk;
 }
 
@@ -4495,6 +4692,18 @@ static void inc_max_seq(struct lruvec *lruvec, bool can_swap, bool force_scan)
 	spin_unlock_irq(&lruvec->lru_lock);
 }
 
+/**
+ * 尝试增加LRU（最近最少使用）管理的最大序列号。
+ * 此函数根据当前的最大序列号决定是否以及如何更新LRU列表，
+ * 旨在优化内存使用并提高系统效率。
+ *
+ * @param lruvec 包含LRU相关信息的LRU向量结构。
+ * @param max_seq 当前考虑的最大序列号。
+ * @param sc 扫描控制结构，包含控制扫描行为的参数。
+ * @param can_swap 标志，指示是否允许交换。
+ * @param force_scan 标志，指示即使正常条件不满足也要强制进行扫描。
+ * @return success 成功增加最大序列号返回true；否则返回false。
+ */
 static bool try_to_inc_max_seq(struct lruvec *lruvec, unsigned long max_seq,
 			       struct scan_control *sc, bool can_swap, bool force_scan)
 {
@@ -4503,25 +4712,26 @@ static bool try_to_inc_max_seq(struct lruvec *lruvec, unsigned long max_seq,
 	struct mm_struct *mm = NULL;
 	struct lru_gen_folio *lrugen = &lruvec->lrugen;
 
+	// 检查传递的max_seq是否大于lrugen中的当前最大序列号
 	VM_WARN_ON_ONCE(max_seq > READ_ONCE(lrugen->max_seq));
 
-	/* see the comment in iterate_mm_list() */
+	/* 参见iterate_mm_list()中的注释 */
 	if (max_seq <= READ_ONCE(lruvec->mm_state.seq)) {
 		success = false;
 		goto done;
 	}
 
 	/*
-	 * If the hardware doesn't automatically set the accessed bit, fallback
-	 * to lru_gen_look_around(), which only clears the accessed bit in a
-	 * handful of PTEs. Spreading the work out over a period of time usually
-	 * is less efficient, but it avoids bursty page faults.
-	 */
+		* 如果硬件不会自动设置访问位，则回退到lru_gen_look_around()，
+		* 该函数仅清除少数PTE中的访问位。将工作分散在一段时间内通常效率较低，
+		* 但可以避免突发的页面错误。
+		*/
 	if (!should_walk_mmu()) {
 		success = iterate_mm_list_nowalk(lruvec, max_seq);
 		goto done;
 	}
 
+	// walk current's mm ? (current->mm)
 	walk = set_mm_walk(NULL, true);
 	if (!walk) {
 		success = iterate_mm_list_nowalk(lruvec, max_seq);
@@ -4533,11 +4743,16 @@ static bool try_to_inc_max_seq(struct lruvec *lruvec, unsigned long max_seq,
 	walk->can_swap = can_swap;
 	walk->force_scan = force_scan;
 
+	// 遍历内存管理列表，处理每个内存管理结构
 	do {
+	// 尝试获取下一个内存管理结构
 		success = iterate_mm_list(lruvec, walk, &mm);
+
+		// 如果成功获取到内存管理结构，则对其进行处理
 		if (mm)
 			walk_mm(lruvec, mm, walk);
 	} while (mm);
+	// 继续遍历直到没有更多的内存管理结构
 done:
 	if (success)
 		inc_max_seq(lruvec, can_swap, force_scan);
@@ -4765,22 +4980,38 @@ static int lru_gen_memcg_seg(struct lruvec *lruvec)
 	return READ_ONCE(lruvec->lrugen.seg);
 }
 
+/**
+ * lru_gen_rotate_memcg - 根据指定操作旋转内存组LRU列表中的一个条目
+ * @lruvec: 指向LRU向量的指针，代表一组LRU列表
+ * @op: 指定的操作类型，决定如何旋转LRU列表
+ *
+ * 本函数根据@op参数的值，选择性地更新@lruvec在内存组LRU列表中的位置。
+ * 它通过删除并重新插入LRU列表来实现旋转，以维护LRU（最近最少使用）的顺序。
+ * 不同的操作类型（如头部插入、尾部插入、变老或变年轻）会导致不同的旋转行为。
+ *
+ * 注意：此函数在执行过程中会锁定内存组的LRU列表，以防止其他操作同时修改。
+ */
 static void lru_gen_rotate_memcg(struct lruvec *lruvec, int op)
 {
 	int seg;
 	int old, new;
 	unsigned long flags;
+	// 选择一个随机的分桶编号，用于确定LRU列表的位置
 	int bin = get_random_u32_below(MEMCG_NR_BINS);
+	// 获取LRU向量所属的节点
 	struct pglist_data *pgdat = lruvec_pgdat(lruvec);
 
+	// 锁定内存组的LRU列表，防止其他操作同时修改
 	spin_lock_irqsave(&pgdat->memcg_lru.lock, flags);
 
+	// 确保LRU列表项已经被正确地链接
 	VM_WARN_ON_ONCE(hlist_nulls_unhashed(&lruvec->lrugen.list));
 
+	// 初始化分段和代数
 	seg = 0;
 	new = old = lruvec->lrugen.gen;
 
-	/* see the comment on MEMCG_NR_GENS */
+	// 根据操作类型确定新的分段和代数
 	if (op == MEMCG_LRU_HEAD)
 		seg = MEMCG_LRU_HEAD;
 	else if (op == MEMCG_LRU_TAIL)
@@ -4792,22 +5023,28 @@ static void lru_gen_rotate_memcg(struct lruvec *lruvec, int op)
 	else
 		VM_WARN_ON_ONCE(true);
 
+	// 从当前LRU列表中删除项
 	hlist_nulls_del_rcu(&lruvec->lrugen.list);
 
+	// 根据新分段和代数重新插入到LRU列表中
 	if (op == MEMCG_LRU_HEAD || op == MEMCG_LRU_OLD)
 		hlist_nulls_add_head_rcu(&lruvec->lrugen.list, &pgdat->memcg_lru.fifo[new][bin]);
 	else
 		hlist_nulls_add_tail_rcu(&lruvec->lrugen.list, &pgdat->memcg_lru.fifo[new][bin]);
 
+	// 更新旧代数和新代数的计数
 	pgdat->memcg_lru.nr_memcgs[old]--;
 	pgdat->memcg_lru.nr_memcgs[new]++;
 
+	// 更新LRU向量的代数和分段
 	lruvec->lrugen.gen = new;
 	WRITE_ONCE(lruvec->lrugen.seg, seg);
 
+	// 如果旧代数的计数为零且为当前序列号，则更新序列号
 	if (!pgdat->memcg_lru.nr_memcgs[old] && old == get_memcg_gen(pgdat->memcg_lru.seq))
 		WRITE_ONCE(pgdat->memcg_lru.seq, pgdat->memcg_lru.seq + 1);
 
+	// 解锁内存组的LRU列表
 	spin_unlock_irqrestore(&pgdat->memcg_lru.lock, flags);
 }
 
@@ -4894,65 +5131,75 @@ static int lru_gen_memcg_seg(struct lruvec *lruvec)
  *                          the eviction
  ******************************************************************************/
 
+/**
+ * 根据给定的条件对一个folio进行排序，以决定其在LRU（最近最少使用）列表中的位置。
+ * 此函数旨在优化内存管理，通过调整folio在LRU列表中的位置来影响页面回收行为。
+ *
+ * @param lruvec LRU向量，包含一组LRU列表和相关的统计信息。
+ * @param folio 要排序的folio结构体指针，代表一个内存页面。
+ * @param tier_idx 层级索引，用于确定folio的保护层级。
+ * @return 成功排序后返回true，否则返回false。
+ */
 static bool sort_folio(struct lruvec *lruvec, struct folio *folio, int tier_idx)
 {
-	bool success;
-	int gen = folio_lru_gen(folio);
-	int type = folio_is_file_lru(folio);
-	int zone = folio_zonenum(folio);
-	int delta = folio_nr_pages(folio);
-	int refs = folio_lru_refs(folio);
-	int tier = lru_tier_from_refs(refs);
-	struct lru_gen_folio *lrugen = &lruvec->lrugen;
+    bool success;
+    int gen = folio_lru_gen(folio);
+    int type = folio_is_file_lru(folio);
+    int zone = folio_zonenum(folio);
+    int delta = folio_nr_pages(folio);
+    int refs = folio_lru_refs(folio);
+    int tier = lru_tier_from_refs(refs);
+    struct lru_gen_folio *lrugen = &lruvec->lrugen;
 
-	VM_WARN_ON_ONCE_FOLIO(gen >= MAX_NR_GENS, folio);
+    // 检查generation是否超出最大值
+    VM_WARN_ON_ONCE_FOLIO(gen >= MAX_NR_GENS, folio);
 
-	/* unevictable */
-	if (!folio_evictable(folio)) {
-		success = lru_gen_del_folio(lruvec, folio, true);
-		VM_WARN_ON_ONCE_FOLIO(!success, folio);
-		folio_set_unevictable(folio);
-		lruvec_add_folio(lruvec, folio);
-		__count_vm_events(UNEVICTABLE_PGCULLED, delta);
-		return true;
-	}
+    /* 处理不可驱逐的folio */
+    if (!folio_evictable(folio)) {
+        success = lru_gen_del_folio(lruvec, folio, true);
+        VM_WARN_ON_ONCE_FOLIO(!success, folio);
+        folio_set_unevictable(folio);
+        lruvec_add_folio(lruvec, folio);
+        __count_vm_events(UNEVICTABLE_PGCULLED, delta);
+        return true;
+    }
 
-	/* dirty lazyfree */
-	if (type == LRU_GEN_FILE && folio_test_anon(folio) && folio_test_dirty(folio)) {
-		success = lru_gen_del_folio(lruvec, folio, true);
-		VM_WARN_ON_ONCE_FOLIO(!success, folio);
-		folio_set_swapbacked(folio);
-		lruvec_add_folio_tail(lruvec, folio);
-		return true;
-	}
+    /* 处理脏的lazyfree folio */
+    if (type == LRU_GEN_FILE && folio_test_anon(folio) && folio_test_dirty(folio)) {
+        success = lru_gen_del_folio(lruvec, folio, true);
+        VM_WARN_ON_ONCE_FOLIO(!success, folio);
+        folio_set_swapbacked(folio);
+        lruvec_add_folio_tail(lruvec, folio);
+        return true;
+    }
 
-	/* promoted */
-	if (gen != lru_gen_from_seq(lrugen->min_seq[type])) {
-		list_move(&folio->lru, &lrugen->folios[gen][type][zone]);
-		return true;
-	}
+    /* 处理已提升的folio */
+    if (gen != lru_gen_from_seq(lrugen->min_seq[type])) {
+        list_move(&folio->lru, &lrugen->folios[gen][type][zone]);
+        return true;
+    }
 
-	/* protected */
-	if (tier > tier_idx) {
-		int hist = lru_hist_from_seq(lrugen->min_seq[type]);
+    /* 处理受保护的folio */
+    if (tier > tier_idx) {
+        int hist = lru_hist_from_seq(lrugen->min_seq[type]);
 
-		gen = folio_inc_gen(lruvec, folio, false);
-		list_move_tail(&folio->lru, &lrugen->folios[gen][type][zone]);
+        gen = folio_inc_gen(lruvec, folio, false);
+        list_move_tail(&folio->lru, &lrugen->folios[gen][type][zone]);
 
-		WRITE_ONCE(lrugen->protected[hist][type][tier - 1],
-			   lrugen->protected[hist][type][tier - 1] + delta);
-		return true;
-	}
+        WRITE_ONCE(lrugen->protected[hist][type][tier - 1],
+               lrugen->protected[hist][type][tier - 1] + delta);
+        return true;
+    }
 
-	/* waiting for writeback */
-	if (folio_test_locked(folio) || folio_test_writeback(folio) ||
-	    (type == LRU_GEN_FILE && folio_test_dirty(folio))) {
-		gen = folio_inc_gen(lruvec, folio, true);
-		list_move(&folio->lru, &lrugen->folios[gen][type][zone]);
-		return true;
-	}
+    /* 处理等待写入回写的folio */
+    if (folio_test_locked(folio) || folio_test_writeback(folio) ||
+        (type == LRU_GEN_FILE && folio_test_dirty(folio))) {
+        gen = folio_inc_gen(lruvec, folio, true);
+        list_move(&folio->lru, &lrugen->folios[gen][type][zone]);
+        return true;
+    }
 
-	return false;
+    return false;
 }
 
 static bool isolate_folio(struct lruvec *lruvec, struct folio *folio, struct scan_control *sc)
@@ -4989,9 +5236,23 @@ static bool isolate_folio(struct lruvec *lruvec, struct folio *folio, struct sca
 	return true;
 }
 
+/**
+ * 扫描并隔离符合条件的folios以进行回收处理。
+ *
+ * 此函数负责从指定的lruvec中扫描不同区域（zone）和类型的folios，
+ * 并尝试将它们隔离出来以便进一步回收。它根据给定的扫描控制参数
+ * （sc）和列表（list）来执行操作，并返回扫描的folio数量。
+ *
+ * @param lruvec LRU vector结构，包含要扫描的folios。
+ * @param sc 扫描控制参数，包括回收索引等信息。
+ * @param type folio的类型，如匿名或文件支持的。
+ * @param tier 用于区分不同层级的缓存。
+ * @param list 用于存放隔离出来的folios的列表。
+ * @return 返回扫描的folio数量。
+ */
 static int scan_folios(struct lruvec *lruvec, struct scan_control *sc,
 		       int type, int tier, struct list_head *list)
-{
+	{
 	int gen, zone;
 	enum vm_event_item item;
 	int sorted = 0;
@@ -5001,13 +5262,17 @@ static int scan_folios(struct lruvec *lruvec, struct scan_control *sc,
 	struct lru_gen_folio *lrugen = &lruvec->lrugen;
 	struct mem_cgroup *memcg = lruvec_memcg(lruvec);
 
+	// 确保列表为空，避免数据不一致
 	VM_WARN_ON_ONCE(!list_empty(list));
 
+	// 如果生成数达到最小值，则不执行扫描
 	if (get_nr_gens(lruvec, type) == MIN_NR_GENS)
 		return 0;
 
+	// 根据最小序列号确定要扫描的生成代
 	gen = lru_gen_from_seq(lrugen->min_seq[type]);
 
+	// 从高优先级区域向低优先级区域扫描
 	for (zone = sc->reclaim_idx; zone >= 0; zone--) {
 		LIST_HEAD(moved);
 		int skipped = 0;
@@ -5017,6 +5282,7 @@ static int scan_folios(struct lruvec *lruvec, struct scan_control *sc,
 			struct folio *folio = lru_to_folio(head);
 			int delta = folio_nr_pages(folio);
 
+			// 对folio进行一系列的校验，确保其状态正确
 			VM_WARN_ON_ONCE_FOLIO(folio_test_unevictable(folio), folio);
 			VM_WARN_ON_ONCE_FOLIO(folio_test_active(folio), folio);
 			VM_WARN_ON_ONCE_FOLIO(folio_is_file_lru(folio) != type, folio);
@@ -5024,8 +5290,10 @@ static int scan_folios(struct lruvec *lruvec, struct scan_control *sc,
 
 			scanned += delta;
 
+			// 尝试对folio进行排序，如果成功则增加sorted计数
 			if (sort_folio(lruvec, folio, tier))
 				sorted += delta;
+			// 如果排序失败，则尝试隔离folio
 			else if (isolate_folio(lruvec, folio, sc)) {
 				list_add(&folio->lru, list);
 				isolated += delta;
@@ -5034,19 +5302,23 @@ static int scan_folios(struct lruvec *lruvec, struct scan_control *sc,
 				skipped += delta;
 			}
 
+			// 控制扫描的速率，避免过度扫描导致的性能问题
 			if (!--remaining || max(isolated, skipped) >= MIN_LRU_BATCH)
 				break;
 		}
 
+		// 将移动的folio重新放回原位置，更新统计信息
 		if (skipped) {
 			list_splice(&moved, head);
 			__count_zid_vm_events(PGSCAN_SKIP, zone, skipped);
 		}
 
+		// 根据扫描进度决定是否终止扫描
 		if (!remaining || isolated >= MIN_LRU_BATCH)
 			break;
 	}
 
+	// 更新各种虚拟事件计数，以便监控和调试
 	item = PGSCAN_KSWAPD + reclaimer_offset();
 	if (!cgroup_reclaim(sc)) {
 		__count_vm_events(item, isolated);
@@ -5057,9 +5329,9 @@ static int scan_folios(struct lruvec *lruvec, struct scan_control *sc,
 	__count_vm_events(PGSCAN_ANON + type, isolated);
 
 	/*
-	 * There might not be eligible folios due to reclaim_idx. Check the
-	 * remaining to prevent livelock if it's not making progress.
-	 */
+		* 由于reclaim_idx的限制，可能没有符合条件的folios。检查剩余的
+		* 数量以防止在没有取得进展的情况下发生活锁。
+	*/
 	return isolated || !remaining ? scanned : 0;
 }
 
@@ -5082,19 +5354,27 @@ static int get_tier_idx(struct lruvec *lruvec, int type)
 
 	return tier - 1;
 }
-
+/**
+ * 确定从LRU列表中扫描的页面类型（匿名或文件）。
+ *
+ * 该函数通过比较不同层级的匿名和文件页面的控制位置，决定要扫描的页面类型以及要回收的层级范围。
+ *
+ * @param lruvec 包含LRU列表信息的LRU向量。
+ * @param swappiness 系统的swappiness值，用于偏向选择匿名页面。
+ * @param tier_idx 存储选定类型最后一个要回收的层级索引的指针。
+ * @return 返回要扫描的页面类型（匿名或文件）。
+ */
 static int get_type_to_scan(struct lruvec *lruvec, int swappiness, int *tier_idx)
 {
 	int type, tier;
 	struct ctrl_pos sp, pv;
+	// 初始化匿名和文件页面的收益值，反映系统的swappiness策略。
 	int gain[ANON_AND_FILE] = { swappiness, 200 - swappiness };
 
 	/*
-	 * Compare the first tier of anon with that of file to determine which
-	 * type to scan. Also need to compare other tiers of the selected type
-	 * with the first tier of the other type to determine the last tier (of
-	 * the selected type) to evict.
-	 */
+		* 比较匿名页面和文件页面的第一层级，以确定要扫描的类型。
+		* 同时需要比较选定类型的其他层级与另一类型的第一个层级，以确定要回收的最后一个层级（选定类型）。
+		*/
 	read_ctrl_pos(lruvec, LRU_GEN_ANON, 0, gain[LRU_GEN_ANON], &sp);
 	read_ctrl_pos(lruvec, LRU_GEN_FILE, 0, gain[LRU_GEN_FILE], &pv);
 	type = positive_ctrl_err(&sp, &pv);
@@ -5110,7 +5390,17 @@ static int get_type_to_scan(struct lruvec *lruvec, int swappiness, int *tier_idx
 
 	return type;
 }
-
+/**
+ * 根据给定的 LRU 向量、扫描控制和 swappiness 值隔离 folios 以供回收。此函数旨在决定首先扫描哪种类型的页面
+ * （匿名或文件支持的页面）进行回收，考虑系统的 swappiness 设置和 LRU 列表的当前状态。
+ *
+ * @lruvec 表示一组页面的 LRU 向量，通常与内存 cgroup 关联。
+ * @sc 包含页面回收标准的扫描控制结构。
+ * @swappiness 系统的 swappiness 值，影响对匿名或文件支持页面的偏好。
+ * @type_scanned 指向一个整数的指针，用于存储扫描的页面类型。
+ * @list 存储隔离的 folios 以供进一步处理的列表头。
+ * @return 返回成功隔离的 folios 数量。
+ */
 static int isolate_folios(struct lruvec *lruvec, struct scan_control *sc, int swappiness,
 			  int *type_scanned, struct list_head *list)
 {
@@ -5121,9 +5411,8 @@ static int isolate_folios(struct lruvec *lruvec, struct scan_control *sc, int sw
 	DEFINE_MIN_SEQ(lruvec);
 
 	/*
-	 * Try to make the obvious choice first. When anon and file are both
-	 * available from the same generation, interpret swappiness 1 as file
-	 * first and 200 as anon first.
+	 * 尝试首先做出显而易见的选择。当匿名和文件页面都来自同一代时，
+	 * 解释 swappiness 1 为优先文件页面，200 为优先匿名页面。
 	 */
 	if (!swappiness)
 		type = LRU_GEN_FILE;
@@ -5136,6 +5425,7 @@ static int isolate_folios(struct lruvec *lruvec, struct scan_control *sc, int sw
 	else
 		type = get_type_to_scan(lruvec, swappiness, &tier);
 
+	// 尝试扫描确定的类型和层级的 folios
 	for (i = !swappiness; i < ANON_AND_FILE; i++) {
 		if (tier < 0)
 			tier = get_tier_idx(lruvec, type);
@@ -5153,6 +5443,18 @@ static int isolate_folios(struct lruvec *lruvec, struct scan_control *sc, int sw
 	return scanned;
 }
 
+/**
+ * 从内存中逐出页面
+ *
+ * 此函数旨在从给定的lruvec中逐出页面，根据扫描控制参数和swappiness值
+ * 它隔离并尝试回收内存中的页面，以释放内存空间
+ *
+ * @lruvec LRU向量，表示一组相关的内存页面
+ * @sc 扫描控制参数，指导逐出操作的行为
+ * @swappiness 系统回收内存的倾向，较高值更倾向于回收
+ *
+ * 返回: 扫描的页面数，表示逐出尝试的程度
+ */
 static int evict_folios(struct lruvec *lruvec, struct scan_control *sc, int swappiness)
 {
 	int type;
@@ -5169,23 +5471,32 @@ static int evict_folios(struct lruvec *lruvec, struct scan_control *sc, int swap
 	struct mem_cgroup *memcg = lruvec_memcg(lruvec);
 	struct pglist_data *pgdat = lruvec_pgdat(lruvec);
 
+	// 锁定LRU向量以进行安全的内存操作
 	spin_lock_irq(&lruvec->lru_lock);
 
+	// 隔离页面进行进一步处理
 	scanned = isolate_folios(lruvec, sc, swappiness, &type, &list);
 
+	// 尝试增加最小序列号，以管理内存回收的进度
 	scanned += try_to_inc_min_seq(lruvec, swappiness);
 
+	// 如果当前的代数等于最小代数，则不进行任何逐出操作
 	if (get_nr_gens(lruvec, !swappiness) == MIN_NR_GENS)
 		scanned = 0;
 
+	// 解锁以继续其他操作
 	spin_unlock_irq(&lruvec->lru_lock);
 
+	// 如果列表为空，则直接返回扫描的页面数
 	if (list_empty(&list))
 		return scanned;
-retry:
+
+	retry:
+	// 缩小页面列表，实际进行页面回收
 	reclaimed = shrink_folio_list(&list, pgdat, sc, &stat, false);
 	sc->nr_reclaimed += reclaimed;
 
+	// 遍历列表中的每个页面，进行逐出操作
 	list_for_each_entry_safe_reverse(folio, next, &list, lru) {
 		if (!folio_evictable(folio)) {
 			list_del(&folio->lru);
@@ -5215,8 +5526,10 @@ retry:
 		sc->nr_scanned -= folio_nr_pages(folio);
 	}
 
+	// 再次锁定LRU向量以进行安全的内存操作
 	spin_lock_irq(&lruvec->lru_lock);
 
+	// 将页面移动回LRU列表
 	move_folios_to_lru(lruvec, &list);
 
 	walk = current->reclaim_state->mm_walk;
@@ -5229,21 +5542,39 @@ retry:
 	__count_memcg_events(memcg, item, reclaimed);
 	__count_vm_events(PGSTEAL_ANON + type, reclaimed);
 
+	// 解锁以完成内存操作
 	spin_unlock_irq(&lruvec->lru_lock);
 
+	// 对列表中的页面进行未充电处理并释放未引用的页面
 	mem_cgroup_uncharge_list(&list);
 	free_unref_page_list(&list);
 
 	INIT_LIST_HEAD(&list);
 	list_splice_init(&clean, &list);
 
+	// 如果列表中仍有页面，设置跳过重试标志并重试
 	if (!list_empty(&list)) {
 		skip_retry = true;
 		goto retry;
 	}
 
+	// 返回扫描的页面数
 	return scanned;
 }
+
+/**
+ * 判断是否应该运行老化操作。
+ *
+ * @param lruvec 指向LRU向量结构的指针。
+ * @param max_seq 最大序列号。
+ * @param sc 指向扫描控制结构的指针，包含控制扫描的参数。
+ * @param can_swap 表示是否允许交换。
+ * @param nr_to_scan 用于存储需要扫描的页面数量的指针。
+ * @return 返回一个布尔值，指示是否应运行老化操作。
+ *
+ * 此函数根据LRU向量中旧页面和新页面的比例来决定是否开始老化操作，
+ * 目的是均匀分布不同代的页面，确保有效的页面替换决策。
+ */
 
 static bool should_run_aging(struct lruvec *lruvec, unsigned long max_seq,
 			     struct scan_control *sc, bool can_swap, unsigned long *nr_to_scan)
@@ -5256,20 +5587,23 @@ static bool should_run_aging(struct lruvec *lruvec, unsigned long max_seq,
 	struct mem_cgroup *memcg = lruvec_memcg(lruvec);
 	DEFINE_MIN_SEQ(lruvec);
 
-	/* whether this lruvec is completely out of cold folios */
+    // 检查此LRU向量中是否有需要交换出去的冷页面。
 	if (min_seq[!can_swap] + MIN_NR_GENS > max_seq) {
 		*nr_to_scan = 0;
 		return true;
 	}
 
+    // 根据是否允许交换遍历不同类型页面。
 	for (type = !can_swap; type < ANON_AND_FILE; type++) {
 		unsigned long seq;
 
+		// 在指定范围内遍历每个序列号以计算页面数量。
 		for (seq = min_seq[type]; seq <= max_seq; seq++) {
 			unsigned long size = 0;
 
 			gen = lru_gen_from_seq(seq);
 
+			// 计算当前代、类型和区域的页面总数。
 			for (zone = 0; zone < MAX_NR_ZONES; zone++)
 				size += max(READ_ONCE(lrugen->nr_pages[gen][type][zone]), 0L);
 
@@ -5281,26 +5615,18 @@ static bool should_run_aging(struct lruvec *lruvec, unsigned long max_seq,
 		}
 	}
 
-	/* try to scrape all its memory if this memcg was deleted */
+    // 如果内存组被删除，则尝试清理其所有内存。
 	*nr_to_scan = mem_cgroup_online(memcg) ? (total >> sc->priority) : total;
 
-	/*
-	 * The aging tries to be lazy to reduce the overhead, while the eviction
-	 * stalls when the number of generations reaches MIN_NR_GENS. Hence, the
-	 * ideal number of generations is MIN_NR_GENS+1.
-	 */
+	// 当代数小于理想代数时，不需要老化。
 	if (min_seq[!can_swap] + MIN_NR_GENS < max_seq)
 		return false;
 
-	/*
-	 * It's also ideal to spread pages out evenly, i.e., 1/(MIN_NR_GENS+1)
-	 * of the total number of pages for each generation. A reasonable range
-	 * for this average portion is [1/MIN_NR_GENS, 1/(MIN_NR_GENS+2)]. The
-	 * aging cares about the upper bound of hot pages, while the eviction
-	 * cares about the lower bound of cold pages.
-	 */
+	// 检查新页面是否超过总页面数的理想比例。
 	if (young * MIN_NR_GENS > total)
 		return true;
+
+	// 检查旧页面是否低于总页面数的理想比例。
 	if (old * (MIN_NR_GENS + 2) < total)
 		return true;
 
@@ -5311,6 +5637,10 @@ static bool should_run_aging(struct lruvec *lruvec, unsigned long max_seq,
  * For future optimizations:
  * 1. Defer try_to_inc_max_seq() to workqueues to reduce latency for memcg
  *    reclaim.
+ */
+/*
+ * 未来优化方向：
+ * 1. 将 try_to_inc_max_seq() 延迟到工作队列中执行，以减少 memcg 回收时的延迟。
  */
 static long get_nr_to_scan(struct lruvec *lruvec, struct scan_control *sc, bool can_swap)
 {
@@ -5341,14 +5671,29 @@ static unsigned long get_nr_to_reclaim(struct scan_control *sc)
 	return max(sc->nr_to_reclaim, compact_gap(sc->order));
 }
 
+/**
+ * 尝试缩小LRU向量。
+ *
+ * 该函数尝试从给定的LRU向量中回收页面以满足回收标准。
+ * 它根据当前的swappiness设置和扫描控制参数决定要扫描的页面数量。
+ * 函数会继续扫描和回收页面，直到达到目标回收页面数或没有更多页面可扫描为止。
+ *
+ * @param lruvec 要缩小的LRU向量。
+ * @param sc 扫描控制结构，包含扫描参数。
+ * @return 返回一个布尔值，指示缩小尝试是否成功。
+ */
 static bool try_to_shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc)
 {
+	// 要尝试扫描的页面数量
 	long nr_to_scan;
+	// 已扫描的总页面数
 	unsigned long scanned = 0;
+	// 目标回收的页面数
 	unsigned long nr_to_reclaim = get_nr_to_reclaim(sc);
+	// swappiness值，决定交换倾向
 	int swappiness = get_swappiness(lruvec, sc);
 
-	/* clean file folios are more likely to exist */
+	/* 清洁文件页更有可能存在 */
 	if (swappiness && !(sc->gfp_mask & __GFP_IO))
 		swappiness = 1;
 
@@ -5373,10 +5718,23 @@ static bool try_to_shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc)
 		cond_resched();
 	}
 
-	/* whether try_to_inc_max_seq() was successful */
+	/* 是否try_to_inc_max_seq()成功 */
 	return nr_to_scan < 0;
 }
 
+/**
+ * shrink_one - 对一个LRU vector执行收缩操作
+ * @lruvec: 待收缩的LRU vector
+ * @sc: 扫描控制参数
+ *
+ * 此函数的目标是根据给定的扫描控制参数对指定的LRU vector进行收缩，
+ * 以释放内存空间。它会根据内存组的状态和LRU vector的特性来决定收缩的策略。
+ *
+ * 返回值:
+ * - MEMCG_LRU_YOUNG: 表示收缩操作成功且内存组处于年轻状态
+ * - MEMCG_LRU_TAIL: 表示内存组应该被置于尾部进行更深入的收缩
+ * - 0: 表示收缩操作失败
+ */
 static int shrink_one(struct lruvec *lruvec, struct scan_control *sc)
 {
 	bool success;
@@ -5409,7 +5767,7 @@ static int shrink_one(struct lruvec *lruvec, struct scan_control *sc)
 
 	if (!sc->proactive)
 		vmpressure(sc->gfp_mask, memcg, false, sc->nr_scanned - scanned,
-			   sc->nr_reclaimed - reclaimed);
+			sc->nr_reclaimed - reclaimed);
 
 	flush_reclaim_state(sc);
 
@@ -5418,6 +5776,13 @@ static int shrink_one(struct lruvec *lruvec, struct scan_control *sc)
 
 #ifdef CONFIG_MEMCG
 
+/**
+ * shrink_many 函数旨在从指定的内存区域中回收一定数量的页面。
+ * 它通过遍历内存控制组（memcg）的LRU列表来实现页面回收。
+ *
+ * @param pgdat 包含内存信息的数据结构，用于访问内存控制组的LRU列表。
+ * @param sc 控制和跟踪回收过程的结构体，包含回收目标和其他控制信息。
+ */
 static void shrink_many(struct pglist_data *pgdat, struct scan_control *sc)
 {
 	int op;
@@ -5430,54 +5795,68 @@ static void shrink_many(struct pglist_data *pgdat, struct scan_control *sc)
 	const struct hlist_nulls_node *pos;
 	unsigned long nr_to_reclaim = get_nr_to_reclaim(sc);
 
+	// 初始化bin值，用于后续的哈希表遍历
 	bin = first_bin = get_random_u32_below(MEMCG_NR_BINS);
 restart:
 	op = 0;
 	memcg = NULL;
+	// 获取当前内存控制组的代数
 	gen = get_memcg_gen(READ_ONCE(pgdat->memcg_lru.seq));
 
+	// 加锁以安全地遍历哈希表
 	rcu_read_lock();
 
+	// 遍历哈希表中的每个内存控制组
 	hlist_nulls_for_each_entry_rcu(lrugen, pos, &pgdat->memcg_lru.fifo[gen][bin], list) {
 		if (op)
 			lru_gen_rotate_memcg(lruvec, op);
 
+		// 释放上一个内存控制组的引用
 		mem_cgroup_put(memcg);
 
+		// 获取当前lrugen结构体对应的lruvec和内存控制组
 		lruvec = container_of(lrugen, struct lruvec, lrugen);
 		memcg = lruvec_memcg(lruvec);
 
+		// 尝试获取内存控制组的引用，如果失败则继续下一个
 		if (!mem_cgroup_tryget(memcg)) {
 			op = 0;
 			memcg = NULL;
 			continue;
 		}
 
+		// 解锁以便进行页面回收操作
 		rcu_read_unlock();
 
+		// 对当前内存控制组进行页面回收
 		op = shrink_one(lruvec, sc);
 
+		// 加锁以继续安全地遍历哈希表
 		rcu_read_lock();
 
+		// 如果已达到回收目标，则结束回收过程
 		if (sc->nr_reclaimed >= nr_to_reclaim)
 			break;
 	}
 
+	// 解锁并处理最后一个内存控制组
 	rcu_read_unlock();
 
 	if (op)
 		lru_gen_rotate_memcg(lruvec, op);
 
+	// 释放最后一个内存控制组的引用
 	mem_cgroup_put(memcg);
 
+	// 如果已达到回收目标，则返回
 	if (sc->nr_reclaimed >= nr_to_reclaim)
 		return;
 
-	/* restart if raced with lru_gen_rotate_memcg() */
+	// 如果在遍历过程中有其他任务旋转了内存控制组，则重新开始
 	if (gen != get_nulls_value(pos))
 		goto restart;
 
-	/* try the rest of the bins of the current generation */
+	// 继续遍历当前代数的其余哈希桶
 	bin = get_memcg_bin(bin + 1);
 	if (bin != first_bin)
 		goto restart;
@@ -5543,11 +5922,22 @@ static void set_initial_priority(struct pglist_data *pgdat, struct scan_control 
 	sc->priority = clamp(priority, 0, DEF_PRIORITY);
 }
 
+/**
+ * lru_gen_shrink_node - 缩减指定节点上的LRU页面
+ * @pgdat: 节点的页面信息结构体
+ * @sc: 扫描控制参数结构体
+ *
+ * 此函数负责根据扫描控制参数，对指定节点上的LRU页面进行缩减处理。它主要通过
+ * 两种方式实现：针对未映射的干净页面进行优化处理，以及根据当前的扫描和回收策略
+ * 对页面进行回收。该函数还考虑了是否禁用了内存控制组（memcg），以及当前是否为
+ * kswapd进程，以决定采取不同的回收策略。
+ */
 static void lru_gen_shrink_node(struct pglist_data *pgdat, struct scan_control *sc)
 {
 	struct blk_plug plug;
 	unsigned long reclaimed = sc->nr_reclaimed;
 
+	// 确保不是在根回收的上下文中调用
 	VM_WARN_ON_ONCE(!root_reclaim(sc));
 
 	/*
@@ -5555,33 +5945,45 @@ static void lru_gen_shrink_node(struct pglist_data *pgdat, struct scan_control *
 	 * them is likely futile and can cause high reclaim latency when there
 	 * is a large number of memcgs.
 	 */
+	// 如果不允许写入页面或不允许取消映射，则直接跳转到结束处理
 	if (!sc->may_writepage || !sc->may_unmap)
 		goto done;
 
+	// 排空LRU添加缓冲区
 	lru_add_drain();
 
+	// 开始块I/O请求合并
 	blk_start_plug(&plug);
 
+	// 设置内存遍历参数,如果是kswap触发到这里,则是一个全局的回收?
+	// 否则就是current?
+	// aqst : 这里为什么要先回收本进程的? 此时的mm_walk是什么?
 	set_mm_walk(pgdat, sc->proactive);
 
+	// 设置初始优先级
 	set_initial_priority(pgdat, sc);
 
+	// 如果是kswapd进程，重置已回收页面计数
 	if (current_is_kswapd())
 		sc->nr_reclaimed = 0;
 
+	// 根据内存控制组是否禁用来选择回收策略
 	if (mem_cgroup_disabled())
 		shrink_one(&pgdat->__lruvec, sc);
 	else
 		shrink_many(pgdat, sc);
 
+	// 如果是kswapd进程，累加已回收页面数量
 	if (current_is_kswapd())
 		sc->nr_reclaimed += reclaimed;
 
+	// 清除内存遍历参数
 	clear_mm_walk();
 
+	// 结束块I/O请求合并
 	blk_finish_plug(&plug);
 done:
-	/* kswapd should never fail */
+	// kswapd应该永远不会失败
 	pgdat->kswapd_failures = 0;
 }
 
@@ -6511,8 +6913,11 @@ static void shrink_node(pg_data_t *pgdat, struct scan_control *sc)
 	struct lruvec *target_lruvec;
 	bool reclaimable = false;
 
+	// 检查是否启用了LRU生成机制，并且判断当前是否是根回收场景
 	if (lru_gen_enabled() && root_reclaim(sc)) {
+		// 在满足条件的情况下，对指定的节点进行LRU生成缩减操作
 		lru_gen_shrink_node(pgdat, sc);
+		// 操作完成后，直接退出函数
 		return;
 	}
 

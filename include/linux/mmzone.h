@@ -108,6 +108,7 @@ extern int page_group_by_mobility_disabled;
 #define folio_migratetype(folio)				\
 	get_pfnblock_flags_mask(&folio->page, folio_pfn(folio),		\
 			MIGRATETYPE_MASK)
+
 struct free_area {
 	struct list_head	free_list[MIGRATE_TYPES];
 	unsigned long		nr_free;
@@ -131,6 +132,12 @@ enum numa_stat_item {
 
 enum zone_stat_item {
 	/* First 128 byte cacheline (assuming 64 bit words) */
+	// The global and per zone counter sums are in arrays of longs. Reorder the ZVCs
+	// so that the most frequently used ZVCs are put into the same cacheline. That
+	// way calculations of the global, node and per zone vm state touches only a
+	// single cacheline. This is mostly important for 64 bit systems were one 128
+	// byte cacheline takes only 8 longs.
+
 	NR_FREE_PAGES,
 	NR_ZONE_LRU_BASE, /* Used only for compaction and reclaim retry */
 	NR_ZONE_INACTIVE_ANON = NR_ZONE_LRU_BASE,
@@ -315,6 +322,108 @@ enum lruvec_flags {
 
 #endif /* !__GENERATING_BOUNDS_H */
 
+// mm: multi-gen LRU: groundwork
+
+// Evictable pages are divided into multiple generations for each lruvec.
+// The youngest generation number is stored in lrugen->max_seq for both
+// anon and file types as they are aged on an equal footing. The oldest
+// generation numbers are stored in lrugen->min_seq[] separately for anon
+// and file types as clean file pages can be evicted regardless of swap
+// constraints. These three variables are monotonically increasing.
+
+// Generation numbers are truncated into order_base_2(MAX_NR_GENS+1) bits
+// in order to fit into the gen counter in folio->flags. Each truncated
+// generation number is an index to lrugen->lists[]. The sliding window
+// technique is used to track at least MIN_NR_GENS and at most
+// MAX_NR_GENS generations. The gen counter stores a value within [1,
+// MAX_NR_GENS] while a page is on one of lrugen->lists[]. Otherwise it
+// stores 0.
+
+// There are two conceptually independent procedures: "the aging", which
+// produces young generations, and "the eviction", which consumes old
+// generations. They form a closed-loop system, i.e., "the page reclaim".
+// Both procedures can be invoked from userspace for the purposes of working
+// set estimation and proactive reclaim. These techniques are commonly used
+// to optimize job scheduling (bin packing) in data centers [1][2].
+
+// To avoid confusion, the terms "hot" and "cold" will be applied to the
+// multi-gen LRU, as a new convention; the terms "active" and "inactive" will
+// be applied to the active/inactive LRU, as usual.
+
+// The protection of hot pages and the selection of cold pages are based
+// on page access channels and patterns. There are two access channels:
+// one through page tables and the other through file descriptors. The
+// protection of the former channel is by design stronger because:
+// 1. The uncertainty in determining the access patterns of the former
+// channel is higher due to the approximation of the accessed bit.
+// 2. The cost of evicting the former channel is higher due to the TLB
+// flushes required and the likelihood of encountering the dirty bit.
+// 3. The penalty of underprotecting the former channel is higher because
+// applications usually do not prepare themselves for major page
+// faults like they do for blocked I/O. E.g., GUI applications
+// commonly use dedicated I/O threads to avoid blocking rendering
+// threads.
+
+// There are also two access patterns: one with temporal locality and the
+// other without. For the reasons listed above, the former channel is
+// assumed to follow the former pattern unless VM_SEQ_READ or VM_RAND_READ is
+// present; the latter channel is assumed to follow the latter pattern unless
+// outlying refaults have been observed [3][4].
+
+// The next patch will address the "outlying refaults". Three macros, i.e.,
+// LRU_REFS_WIDTH, LRU_REFS_PGOFF and LRU_REFS_MASK, used later are added in
+// this patch to make the entire patchset less diffy.
+
+// A page is added to the youngest generation on faulting. The aging needs
+// to check the accessed bit at least twice before handing this page over to
+// the eviction. The first check takes care of the accessed bit set on the
+// initial fault; the second check makes sure this page has not been used
+// since then. This protocol, AKA second chance, requires a minimum of two
+// generations, hence MIN_NR_GENS.
+
+// [1] https://dl.acm.org/doi/10.1145/3297858.3304053
+// [2] https://dl.acm.org/doi/10.1145/3503222.3507731
+// [3] https://lwn.net/Articles/495543/
+// [4] https://lwn.net/Articles/815342/
+
+// Link: https://lkml.kernel.org/r/20220918080010.2920238-6-yuzhao@google.com
+// Signed-off-by: Yu Zhao <yuzhao@google.com>
+// Acked-by: Brian Geffon <bgeffon@google.com>
+// Acked-by: Jan Alexander Steffens (heftig) <heftig@archlinux.org>
+// Acked-by: Oleksandr Natalenko <oleksandr@natalenko.name>
+// Acked-by: Steven Barrett <steven@liquorix.net>
+// Acked-by: Suleiman Souhlal <suleiman@google.com>
+// Tested-by: Daniel Byrne <djbyrne@mtu.edu>
+// Tested-by: Donald Carr <d@chaos-reins.com>
+// Tested-by: Holger Hoffstätte <holger@applied-asynchrony.com>
+// Tested-by: Konstantin Kharlamov <Hi-Angel@yandex.ru>
+// Tested-by: Shuang Zhai <szhai2@cs.rochester.edu>
+// Tested-by: Sofia Trinh <sofia.trinh@edi.works>
+// Tested-by: Vaibhav Jain <vaibhav@linux.ibm.com>
+// Cc: Andi Kleen <ak@linux.intel.com>
+// Cc: Aneesh Kumar K.V <aneesh.kumar@linux.ibm.com>
+// Cc: Barry Song <baohua@kernel.org>
+// Cc: Catalin Marinas <catalin.marinas@arm.com>
+// Cc: Dave Hansen <dave.hansen@linux.intel.com>
+// Cc: Hillf Danton <hdanton@sina.com>
+// Cc: Jens Axboe <axboe@kernel.dk>
+// Cc: Johannes Weiner <hannes@cmpxchg.org>
+// Cc: Jonathan Corbet <corbet@lwn.net>
+// Cc: Linus Torvalds <torvalds@linux-foundation.org>
+// Cc: Matthew Wilcox <willy@infradead.org>
+// Cc: Mel Gorman <mgorman@suse.de>
+// Cc: Miaohe Lin <linmiaohe@huawei.com>
+// Cc: Michael Larabel <Michael@MichaelLarabel.com>
+// Cc: Michal Hocko <mhocko@kernel.org>
+// Cc: Mike Rapoport <rppt@kernel.org>
+// Cc: Mike Rapoport <rppt@linux.ibm.com>
+// Cc: Peter Zijlstra <peterz@infradead.org>
+// Cc: Qi Zheng <zhengqi.arch@bytedance.com>
+// Cc: Tejun Heo <tj@kernel.org>
+// Cc: Vlastimil Babka <vbabka@suse.cz>
+// Cc: Will Deacon <will@kernel.org>
+// Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+
 /*
  * Evictable pages are divided into multiple generations. The youngest and the
  * oldest generation numbers, max_seq and min_seq, are monotonically increasing.
@@ -343,6 +452,34 @@ enum lruvec_flags {
  * accesses through page tables. This requires order_base_2(MAX_NR_GENS+1) bits
  * in folio->flags.
  */
+/*
+ * 对于每个节点，内存控制组（memcgs）被划分为两代：老年代和年轻代。
+ * 对于每一代，memcgs被随机分片成多个bin以提高可扩展性。
+ * 对于每个bin，hlist_nulls被虚拟地分为三个段：头部、尾部和默认段。
+ *
+ * 在老年代的随机bin的尾部添加一个在线的memcg。
+ * 在老年代的随机bin的头部开始驱逐。
+ * 每个节点的memcg代计数器，通过对其取模（MOD MEMCG_NR_GENS）来索引老年代，
+ * 当它的所有bin变为空时，计数器递增。
+ *
+ * 存在四种操作：
+ * 1. MEMCG_LRU_HEAD，将一个memcg移动到其当前代（老年代或年轻代）的随机bin的头部，并更新其"seg"为"head"；
+ * 2. MEMCG_LRU_TAIL，将一个memcg移动到其当前代（老年代或年轻代）的随机bin的尾部，并更新其"seg"为"tail"；
+ * 3. MEMCG_LRU_OLD，将一个memcg移动到老年代的随机bin的头部，将其"gen"更新为"old"，并重置其"seg"为"default"；
+ * 4. MEMCG_LRU_YOUNG，将一个memcg移动到年轻代的随机bin的尾部，将其"gen"更新为"young"，并重置其"seg"为"default"。
+ *
+ * 触发上述操作的事件包括：
+ * 1. 超过软限制，触发MEMCG_LRU_HEAD；
+ * 2. 第一次尝试回收低于low的memcg，触发MEMCG_LRU_TAIL；
+ * 3. 第一次尝试回收低于可回收大小阈值的memcg，触发MEMCG_LRU_TAIL；
+ * 4. 第二次尝试回收低于可回收大小阈值的memcg，触发MEMCG_LRU_YOUNG；
+ * 5. 尝试回收低于min的memcg，触发MEMCG_LRU_YOUNG；
+ * 6. 完成回收路径上的老化过程，触发MEMCG_LRU_YOUNG；
+ * 7. 离线一个memcg，触发MEMCG_LRU_OLD。
+ *
+ * 注意，memcg LRU仅适用于全局回收，通过轮询递增它们的最大序列号（max_seq）计数器来确保所有符合条件的memcg的最终公平性。
+ * 对于memcg回收，仍然依赖于mem_cgroup_iter()。
+ */
 #define MIN_NR_GENS		2U
 #define MAX_NR_GENS		4U
 
@@ -366,11 +503,123 @@ enum lruvec_flags {
  * accesses through file descriptors. This uses MAX_NR_TIERS-2 spare bits in
  * folio->flags.
  */
+/*
+ * 每一代分为多个层级。通过文件描述符访问N次的页面位于第order_base_2(N)层级。
+ * 位于第一层（N=0,1）的页面，如果未通过页表故障或预读，则会被标记为PG_referenced。
+ * 位于其他任何层级（N>1）的页面会被标记为PG_referenced和PG_workingset。
+ * 这意味着即使在不使用额外位的情况下，也至少支持两个层级。
+ *
+ * 与跨代移动需要LRU锁不同，跨层级移动仅涉及对folio->flags的原子操作，
+ * 因此在缓冲访问路径中成本可忽略不计。在驱逐路径中，通过比较第一层和其他层的
+ * refaulted/(evicted+protected)可以推断通过文件描述符多次访问的页面是否统计上是热的，
+ * 从而决定是否值得保护。
+ *
+ * MAX_NR_TIERS设置为4，这样多代LRU可以支持比活动/非活动LRU多一倍的类别数，
+ * 同时跟踪通过文件描述符的访问。这使用了folio->flags中的MAX_NR_TIERS-2个备用位。
+ */
+//  1. 多代 LRU 的概念
+// 1.1 术语
+// Promotion（提升）：将“热”页面（频繁访问的页面）提升到最年轻的代。
+// Demotion（降级）：将“冷”页面（不再访问的页面）降级，准备驱逐。
+// 2. 页面老化
+// 老化过程：在给定的 lruvec（LRU 向量）中，当 max_seq - min_seq + 1 接近 MIN_NR_GENS 时，max_seq 会被递增。这表示老化过程正在产生年轻代。
+// 页面的提升和降级：
+// 提升：在通过页表访问到“热”页面时，直接将其提升到最年轻的代。
+// 降级：在递增 max_seq 时，自动进行降级处理。
+// 3. 页面驱逐
+// 驱逐过程：在给定的 lruvec 中，当由 min_seq 索引的 lrugen->lists[] 变为空时，min_seq 会递增。这表示最旧的代可以被驱逐。
+// 反馈循环：通过类似 PID 控制器的反馈机制监控匿名页面和文件页面的重缺页（refaults），以决定驱逐哪种类型的页面。
+// 4. 页面保护机制
+// 访问计数：每个代被分为多个层次，页面被访问 N 次时，其所在的层次为 order_base_2(N)。这意味着页面的访问频率会影响其被保护的层次。
+// 保护策略：
+// 访问频繁的页面会被认为是“热”的，并在驱逐路径中获得保护。
+// 如果反馈循环决定保护该页面，则将其移动到下一个代（即 min_seq + 1）。
+// 5. 优势
+// 该实现带来了一些显著的优势：
+
+// 减少激活成本：通过推断多次通过文件描述符访问的页面是否值得保护，从而消除激活成本。
+// 避免过度保护：合理考虑通过页表访问的页面，避免对多次通过文件描述符访问的页面过度保护。
+// 更好的保护策略：更多的层次提供了更好的保护，尤其是在高负载的缓冲 I/O 工作负载下。
+// 6. 性能基准
+// 单工作负载测试：使用 fio 和 memcached 进行基准测试，显示了在不同情况下的性能提升和下降。具体数据显示，在 buffered I/O 工作负载下，IOPS 和带宽显著提升，而在匿名工作负载下略有下降。
+// CPU 和内存配置：基准测试是在特定的硬件配置上进行的，确保了结果的可靠性。
+// 7. 代码更改示例
+// 提到了一些代码的具体更改，包括对 brd.c 驱动的修改，以支持新的内存管理策略。
+// 其他配置文件的示例显示了系统在不同情况下的配置。
+// 总结
+// 这段补丁和注释为多代 LRU 的实现提供了详细的背景和技术细节，尤其是在页面老化、驱逐和保护机制方面。通过引入新的术语和反馈机制，Linux 内核在内存管理上实现了更灵活和高效的策略，旨在提高系统性能并减少内存压力。
+// https://lkml.kernel.org/r/20220918080010.2920238-7-yuzhao@google.com
 #define MAX_NR_TIERS		4U
 
 #ifndef __GENERATING_BOUNDS_H
 
 struct lruvec;
+// mm: multi-gen LRU: exploit locality in rmap
+
+// Searching the rmap for PTEs mapping each page on an LRU list (to test and
+// clear the accessed bit) can be expensive because pages from different VMAs
+// (PA space) are not cache friendly to the rmap (VA space). For workloads
+// mostly using mapped pages, searching the rmap can incur the highest CPU
+// cost in the reclaim path.
+
+// This patch exploits spatial locality to reduce the trips into the rmap.
+// When shrink_page_list() walks the rmap and finds a young PTE, a new
+// function lru_gen_look_around() scans at most BITS_PER_LONG-1 adjacent
+// PTEs. On finding another young PTE, it clears the accessed bit and
+// updates the gen counter of the page mapped by this PTE to
+// (max_seq%MAX_NR_GENS)+1.
+
+// 在搜索rmap以查找映射每个页面的PTE（以测试并清除访问位）时，可能会付出高昂的代价，
+// 因为来自不同VMA（物理地址空间）的页面在rmap（虚拟地址空间）中对缓存不友好。
+// 对于主要使用映射页面的工作负载，在回收路径中搜索rmap可能会产生最高的CPU成本。
+
+// 此补丁利用空间局部性来减少进入rmap的次数。当shrink_page_list()遍历rmap并找到一个年轻的PTE时，
+// 一个新函数lru_gen_look_around()最多扫描相邻的BITS_PER_LONG-1个PTE。在找到另一个年轻的PTE时，
+// 它清除该PTE的访问位，并将映射到该PTE的页面的gen计数器更新为(max_seq%MAX_NR_GENS)+1。
+
+// Server benchmark results:
+// Single workload:
+// fio (buffered I/O): no change
+
+// Single workload:
+// memcached (anon): +[3, 5]%
+// Ops/sec KB/sec
+// patch1-6: 1106168.46 43025.04
+// patch1-7: 1147696.57 44640.29
+
+// Configurations:
+// no change
+
+// Client benchmark results:
+// kswapd profiles:
+// patch1-6
+// 39.03% lzo1x_1_do_compress (real work)
+// 18.47% page_vma_mapped_walk (overhead)
+// 6.74% _raw_spin_unlock_irq
+// 3.97% do_raw_spin_lock
+// 2.49% ptep_clear_flush
+// 2.48% anon_vma_interval_tree_iter_first
+// 1.92% folio_referenced_one
+// 1.88% __zram_bvec_write
+// 1.48% memmove
+// 1.31% vma_interval_tree_iter_next
+
+// patch1-7
+// 48.16% lzo1x_1_do_compress (real work)
+// 8.20% page_vma_mapped_walk (overhead)
+// 7.06% _raw_spin_unlock_irq
+// 2.92% ptep_clear_flush
+// 2.53% __zram_bvec_write
+// 2.11% do_raw_spin_lock
+// 2.02% memmove
+// 1.93% lru_gen_look_around
+// 1.56% free_unref_page_list
+// 1.40% memset
+
+// Configurations:
+// no change
+
+// // Link: https://lkml.kernel.org/r/20220918080010.2920238-8-yuzhao@google.com
 struct page_vma_mapped_walk;
 
 #define LRU_GEN_MASK		((BIT(LRU_GEN_WIDTH) - 1) << LRU_GEN_PGOFF)
@@ -413,6 +662,123 @@ enum {
  * The number of pages in each generation is eventually consistent and therefore
  * can be transiently negative when reset_batch_size() is pending.
  */
+/*
+ * 最年轻的一代编号在 max_seq 中存储，适用于匿名和文件类型，因为它们是平等老化的。
+ * 最老的一代编号分别在 min_seq[] 中为匿名和文件类型单独存储，因为干净的文件页可以
+ * 不受交换限制的影响而被驱逐。
+ *
+ * 通常情况下，匿名和文件的 min_seq 是同步的。但如果交换受到限制，例如，没有交换空间，
+ * 文件的 min_seq 允许提前推进，而留下匿名的 min_seq。
+ *
+ * 每一代中的页数最终是一致的，因此在重置 batch_size() 待处理时可能是临时负数。
+ */
+// mm: multi-gen LRU: rename lru_gen_struct to lru_gen_folio
+
+// Patch series "mm: multi-gen LRU: memcg LRU", v3.
+
+// Overview
+// ​========
+
+// An memcg LRU is a per-node LRU of memcgs. It is also an LRU of LRUs,
+// since each node and memcg combination has an LRU of folios (see
+// mem_cgroup_lruvec()).
+
+// Its goal is to improve the scalability of global reclaim, which is
+// critical to system-wide memory overcommit in data centers. Note that
+// memcg reclaim is currently out of scope.
+
+// Its memory bloat is a pointer to each lruvec and negligible to each
+// pglist_data. In terms of traversing memcgs during global reclaim, it
+// improves the best-case complexity from O(n) to O(1) and does not affect
+// the worst-case complexity O(n). Therefore, on average, it has a sublinear
+// complexity in contrast to the current linear complexity.
+
+// The basic structure of an memcg LRU can be understood by an analogy to
+// the active/inactive LRU (of folios):
+// 1. It has the young and the old (generations), i.e., the counterparts
+// to the active and the inactive;
+// 2. The increment of max_seq triggers promotion, i.e., the counterpart
+// to activation;
+// 3. Other events trigger similar operations, e.g., offlining an memcg
+// triggers demotion, i.e., the counterpart to deactivation.
+
+// In terms of global reclaim, it has two distinct features:
+// 1. Sharding, which allows each thread to start at a random memcg (in
+// the old generation) and improves parallelism;
+// 2. Eventual fairness, which allows direct reclaim to bail out at will
+// and reduces latency without affecting fairness over some time.
+
+// The commit message in patch 6 details the workflow:
+// https://lore.kernel.org/r/20221222041905.2431096-7-yuzhao@google.com/
+
+// The following is a simple test to quickly verify its effectiveness.
+
+// Test design:
+// 1. Create multiple memcgs.
+// 2. Each memcg contains a job (fio).
+// 3. All jobs access the same amount of memory randomly.
+// 4. The system does not experience global memory pressure.
+// 5. Periodically write to the root memory.reclaim.
+
+// Desired outcome:
+// 1. All memcgs have similar pgsteal counts, i.e., stddev(pgsteal)
+// over mean(pgsteal) is close to 0%.
+// 2. The total pgsteal is close to the total requested through
+// memory.reclaim, i.e., sum(pgsteal) over sum(requested) is close
+// to 100%.
+
+// Actual outcome [1]:
+// MGLRU off MGLRU on
+// stddev(pgsteal) / mean(pgsteal) 75% 20%
+// sum(pgsteal) / sum(requested) 425% 95%
+
+// ####################################################################
+// MEMCGS=128
+
+// for ((memcg = 0; memcg < $MEMCGS; memcg++)); do
+// mkdir /sys/fs/cgroup/memcg$memcg
+// done
+
+// start() {
+// echo $BASHPID > /sys/fs/cgroup/memcg$memcg/cgroup.procs
+
+// fio -name=memcg$memcg --numjobs=1 --ioengine=mmap \
+// --filename=/dev/zero --size=1920M --rw=randrw \
+// --rate=64m,64m --random_distribution=random \
+// --fadvise_hint=0 --time_based --runtime=10h \
+// --group_reporting --minimal
+// }
+
+// for ((memcg = 0; memcg < $MEMCGS; memcg++)); do
+// start &
+// done
+
+// sleep 600
+
+// for ((i = 0; i < 600; i++)); do
+// echo 256m >/sys/fs/cgroup/memory.reclaim
+// sleep 6
+// done
+
+// for ((memcg = 0; memcg < $MEMCGS; memcg++)); do
+// grep "pgsteal " /sys/fs/cgroup/memcg$memcg/memory.stat
+// done
+// ####################################################################
+
+// [1]: This was obtained from running the above script (touches less
+// than 256GB memory) on an EPYC 7B13 with 512GB DRAM for over an
+// hour.
+
+
+// This patch (of 8):
+
+// The new name lru_gen_folio will be more distinct from the coming
+// lru_gen_memcg.
+
+// Link: https://lkml.kernel.org/r/20221222041905.2431096-1-yuzhao@google.com
+// Link: https://lkml.kernel.org/r/20221222041905.2431096-2-yuzhao@google.com
+// Signed-off-by: Yu Zhao <yuzhao@google.com>
+
 struct lru_gen_folio {
 	/* the aging increments the youngest generation number */
 	unsigned long max_seq;
@@ -421,16 +787,21 @@ struct lru_gen_folio {
 	/* the birth time of each generation in jiffies */
 	unsigned long timestamps[MAX_NR_GENS];
 	/* the multi-gen LRU lists, lazily sorted on eviction */
+	// 多代LRU（Least Recently Used）链表， eviction（驱逐）时懒惰地进行排序,
+	// alex's qustion :  : 为什么要和zone有关系? 不应该和node关联吗?
 	struct list_head folios[MAX_NR_GENS][ANON_AND_FILE][MAX_NR_ZONES];
 	/* the multi-gen LRU sizes, eventually consistent */
+	/* 多代LRU（最近最少使用）缓存的大小，追求最终一致性 */
 	long nr_pages[MAX_NR_GENS][ANON_AND_FILE][MAX_NR_ZONES];
 	/* the exponential moving average of refaulted */
+	// 计算参考故障的指数移动平均值 (EMA)。
 	unsigned long avg_refaulted[ANON_AND_FILE][MAX_NR_TIERS];
 	/* the exponential moving average of evicted+protected */
 	unsigned long avg_total[ANON_AND_FILE][MAX_NR_TIERS];
 	/* the first tier doesn't need protection, hence the minus one */
 	unsigned long protected[NR_HIST_GENS][ANON_AND_FILE][MAX_NR_TIERS - 1];
 	/* can be modified without holding the LRU lock */
+	// alex's qustion : 为什么可以不用锁
 	atomic_long_t evicted[NR_HIST_GENS][ANON_AND_FILE][MAX_NR_TIERS];
 	atomic_long_t refaulted[NR_HIST_GENS][ANON_AND_FILE][MAX_NR_TIERS];
 	/* whether the multi-gen LRU is enabled */
@@ -531,6 +902,32 @@ void lru_gen_look_around(struct page_vma_mapped_walk *pvmw);
  * incrementing of their max_seq counters ensures the eventual fairness to all
  * eligible memcgs. For memcg reclaim, it still relies on mem_cgroup_iter().
  */
+/*
+ * 对于每个节点，memcgs（内存控制组）被分为两代：老代和年轻代。对于每一代，memcgs被随机分片到多个bin中以提高可扩展性。
+ * 对于每个bin，hlist_nulls（空列表）被虚拟分为三段：头、尾和默认。
+ *
+ * 一个上线的memcg被添加到老代的一个随机bin的尾部。驱逐操作从老代的一个随机bin的头部开始。每节点的memcg代计数器，
+ * 其余数（模MEMCG_NR_GENS）索引老代，在其所有bin变为空时递增。
+ *
+ * 存在四种操作：
+ * 1. MEMCG_LRU_HEAD，将一个memcg移动到其当前代（老或年轻）的一个随机bin的头部，并将其“seg”更新为“头”；
+ * 2. MEMCG_LRU_TAIL，将一个memcg移动到其当前代（老或年轻）的一个随机bin的尾部，并将其“seg”更新为“尾”；
+ * 3. MEMCG_LRU_OLD，将一个memcg移动到老代的一个随机bin的头部，将其“gen”更新为“老”，并重置其“seg”为“默认”；
+ * 4. MEMCG_LRU_YOUNG，将一个memcg移动到年轻代的一个随机bin的尾部，将其“gen”更新为“年轻”，并重置其“seg”为“默认”。
+ *
+ * 触发上述操作的事件包括：
+ * 1. 超过软限制，触发MEMCG_LRU_HEAD；
+ * 2. 第一次尝试回收一个memcg至低于低阈值，触发MEMCG_LRU_TAIL；
+ * 3. 第一次尝试回收一个memcg至低于可回收大小阈值，触发MEMCG_LRU_TAIL；
+ * 4. 第二次尝试回收一个memcg至低于可回收大小阈值，触发MEMCG_LRU_YOUNG；
+ * 5. 尝试回收一个memcg至低于最小阈值，触发MEMCG_LRU_YOUNG；
+ * 6. 在驱逐路径上完成老化，触发MEMCG_LRU_YOUNG；
+ * 7. 下线一个memcg，触发MEMCG_LRU_OLD。
+ *
+ * 注意，memcg LRU仅适用于全局回收，其最大序列计数器的轮换递增确保了对所有符合条件的memcgs的最终公平性。对于memcg回收，
+ * 仍然依赖于mem_cgroup_iter()。
+ */
+
 #define MEMCG_NR_GENS	2
 #define MEMCG_NR_BINS	8
 
@@ -1328,41 +1725,40 @@ struct memory_failure_stats {
  */
 typedef struct pglist_data {
 	/*
-	 * node_zones contains just the zones for THIS node. Not all of the
-	 * zones may be populated, but it is the full list. It is referenced by
-	 * this node's node_zonelists as well as other node's node_zonelists.
+	 * node_zones 包含仅属于此节点的区域。并非所有区域都已填充，但它包含了完整的列表。
+	 * 它被此节点的 node_zonelists 以及其他节点的 node_zonelists 引用。
 	 */
 	struct zone node_zones[MAX_NR_ZONES];
 
 	/*
-	 * node_zonelists contains references to all zones in all nodes.
-	 * Generally the first zones will be references to this node's
-	 * node_zones.
+	 * node_zonelists 包含对所有节点中所有区域的引用。
+	 * 通常，第一个区域将是对此节点的 node_zones 的引用。
 	 */
 	struct zonelist node_zonelists[MAX_ZONELISTS];
 
-	int nr_zones; /* number of populated zones in this node */
-#ifdef CONFIG_FLATMEM	/* means !SPARSEMEM */
+	int nr_zones; /* 此节点中已填充的区域数量 */
+
+#ifdef CONFIG_FLATMEM	/* 意味着 !SPARSEMEM */
 	struct page *node_mem_map;
 #ifdef CONFIG_PAGE_EXTENSION
 	struct page_ext *node_page_ext;
 #endif
 #endif
+
 #if defined(CONFIG_MEMORY_HOTPLUG) || defined(CONFIG_DEFERRED_STRUCT_PAGE_INIT)
 	/*
-	 * Must be held any time you expect node_start_pfn,
-	 * node_present_pages, node_spanned_pages or nr_zones to stay constant.
-	 * Also synchronizes pgdat->first_deferred_pfn during deferred page
-	 * init.
+	 * 必须在任何时候持有 node_size_lock，以确保 node_start_pfn、
+	 * node_present_pages、node_spanned_pages 或 nr_zones 保持不变。
+	 * 还同步了在延迟页面初始化期间的 pgdat->first_deferred_pfn。
 	 *
-	 * pgdat_resize_lock() and pgdat_resize_unlock() are provided to
-	 * manipulate node_size_lock without checking for CONFIG_MEMORY_HOTPLUG
-	 * or CONFIG_DEFERRED_STRUCT_PAGE_INIT.
+	 * pgdat_resize_lock() 和 pgdat_resize_unlock() 提供了在不检查
+	 * CONFIG_MEMORY_HOTPLUG 或 CONFIG_DEFERRED_STRUCT_PAGE_INIT 的情况下操作 node_size_lock 的方法。
 	 *
-	 * Nests above zone->lock and zone->span_seqlock
+	 * 在 zone->lock 和 zone->span_seqlock 之上嵌套。
 	 */
 	spinlock_t node_size_lock;
 #endif
+
 	unsigned long node_start_pfn;
 	unsigned long node_present_pages; /* total number of physical pages */
 	unsigned long node_spanned_pages; /* total size of physical page
@@ -1371,20 +1767,20 @@ typedef struct pglist_data {
 	wait_queue_head_t kswapd_wait;
 	wait_queue_head_t pfmemalloc_wait;
 
-	/* workqueues for throttling reclaim for different reasons. */
+	/* 用于因不同原因限制回收的工作队列。 */
 	wait_queue_head_t reclaim_wait[NR_VMSCAN_THROTTLE];
 
-	atomic_t nr_writeback_throttled;/* nr of writeback-throttled tasks */
-	unsigned long nr_reclaim_start;	/* nr pages written while throttled
-					 * when throttling started. */
+	atomic_t nr_writeback_throttled;/* 写回限制的任务数 */
+	unsigned long nr_reclaim_start;	/* 开始限制时已写入的页面数 */
+
 #ifdef CONFIG_MEMORY_HOTPLUG
 	struct mutex kswapd_lock;
 #endif
-	struct task_struct *kswapd;	/* Protected by kswapd_lock */
+	struct task_struct *kswapd;	/* 受 kswapd_lock 保护 */
 	int kswapd_order;
 	enum zone_type kswapd_highest_zoneidx;
 
-	int kswapd_failures;		/* Number of 'reclaimed == 0' runs */
+	int kswapd_failures;		/* 'reclaimed == 0' 运行次数 */
 
 #ifdef CONFIG_COMPACTION
 	int kcompactd_max_order;
@@ -1394,14 +1790,13 @@ typedef struct pglist_data {
 	bool proactive_compact_trigger;
 #endif
 	/*
-	 * This is a per-node reserve of pages that are not available
-	 * to userspace allocations.
+	 * 这是用户空间分配不可用的页面预留量。
 	 */
 	unsigned long		totalreserve_pages;
 
 #ifdef CONFIG_NUMA
 	/*
-	 * node reclaim becomes active if more unmapped pages exist.
+	 * 如果未映射的页面更多，则激活节点回收。
 	 */
 	unsigned long		min_unmapped_pages;
 	unsigned long		min_slab_pages;
@@ -1412,8 +1807,7 @@ typedef struct pglist_data {
 
 #ifdef CONFIG_DEFERRED_STRUCT_PAGE_INIT
 	/*
-	 * If memory initialisation on large machines is deferred then this
-	 * is the first PFN that needs to be initialised.
+	 * 如果在大型机器上延迟内存初始化，则这是需要初始化的第一个 PFN。
 	 */
 	unsigned long first_deferred_pfn;
 #endif /* CONFIG_DEFERRED_STRUCT_PAGE_INIT */
@@ -1423,41 +1817,42 @@ typedef struct pglist_data {
 #endif
 
 #ifdef CONFIG_NUMA_BALANCING
-	/* start time in ms of current promote rate limit period */
+	/* 当前促进速率限制周期的开始时间（毫秒） */
 	unsigned int nbp_rl_start;
-	/* number of promote candidate pages at start time of current rate limit period */
+	/* 当前速率限制周期开始时的促进候选页面数 */
 	unsigned long nbp_rl_nr_cand;
-	/* promote threshold in ms */
+	/* 促进阈值（毫秒） */
 	unsigned int nbp_threshold;
-	/* start time in ms of current promote threshold adjustment period */
+	/* 当前促进阈值调整周期的开始时间（毫秒） */
 	unsigned int nbp_th_start;
 	/*
-	 * number of promote candidate pages at start time of current promote
-	 * threshold adjustment period
+	 * 当前促进阈值调整周期开始时的促进候选页面数
 	 */
 	unsigned long nbp_th_nr_cand;
 #endif
-	/* Fields commonly accessed by the page reclaim scanner */
+
+	/* 常见的页面回收扫描器字段 */
 
 	/*
-	 * NOTE: THIS IS UNUSED IF MEMCG IS ENABLED.
+	 * 注意：如果启用了 MEMCG，则此字段未使用。
 	 *
-	 * Use mem_cgroup_lruvec() to look up lruvecs.
+	 * 使用 mem_cgroup_lruvec() 查找 lruvecs。
 	 */
 	struct lruvec		__lruvec;
 
 	unsigned long		flags;
 
 #ifdef CONFIG_LRU_GEN
-	/* kswap mm walk data */
+	/* kswap mm 走查数据 */
 	struct lru_gen_mm_walk mm_walk;
-	/* lru_gen_folio list */
+	/* lru_gen_folio 列表 */
 	struct lru_gen_memcg memcg_lru;
 #endif
 
+	// https://lore.kernel.org/all/20220826230642.566725-1-shakeelb@google.com/T/#u
 	CACHELINE_PADDING(_pad2_);
 
-	/* Per-node vmstats */
+	/* 每个节点的 vmstats */
 	struct per_cpu_nodestat __percpu *per_cpu_nodestats;
 	atomic_long_t		vm_stat[NR_VM_NODE_STAT_ITEMS];
 #ifdef CONFIG_NUMA
@@ -1467,7 +1862,6 @@ typedef struct pglist_data {
 	struct memory_failure_stats mf_stats;
 #endif
 } pg_data_t;
-
 #define node_present_pages(nid)	(NODE_DATA(nid)->node_present_pages)
 #define node_spanned_pages(nid)	(NODE_DATA(nid)->node_spanned_pages)
 

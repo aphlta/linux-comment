@@ -911,8 +911,11 @@ static inline cpumask_t *mm_cpumask(struct mm_struct *mm)
 
 struct lru_gen_mm_list {
 	/* mm_struct list for page table walkers */
+	// 用于页表遍历的mm_struct列表，存储与LRU生成相关的内存描述符
 	struct list_head fifo;
+
 	/* protects the list above */
+	// 保护上述列表的自旋锁，以确保在并发访问时列表的一致性和完整性
 	spinlock_t lock;
 };
 

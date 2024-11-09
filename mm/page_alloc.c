@@ -734,16 +734,33 @@ static inline void move_to_free_list(struct page *page, struct zone *zone,
 	list_move_tail(&page->buddy_list, &area->free_list[migratetype]);
 }
 
+/**
+ * 从空闲列表中删除页面。
+ *
+ * 该函数负责从空闲页面列表中移除指定的页面，并更新相应的区域统计信息。
+ * 它还会清除页面的某些状态标志，并将其从 buddy 列表中删除。
+ *
+ * @param page 要从空闲列表中删除的页面。
+ * @param zone 包含被删除页面的区域。
+ * @param order 页面的阶数，用于索引 free_area 数组。
+ */
 static inline void del_page_from_free_list(struct page *page, struct zone *zone,
 					   unsigned int order)
 {
+	/* 如果页面被报告，则清除报告状态并更新报告的页面计数 */
 	/* clear reported state and update reported page count */
 	if (page_reported(page))
 		__ClearPageReported(page);
 
+	/* 从 buddy 列表中删除页面并清除其 buddy 状态 */
+	// alex's qustion : what is bf75f20 function?
 	list_del(&page->buddy_list);
 	__ClearPageBuddy(page);
+
+	/* 清除页面的 private 标志 */
 	set_page_private(page, 0);
+
+	/* 更新区域中的空闲页面计数 */
 	zone->free_area[order].nr_free--;
 }
 
@@ -1449,16 +1466,44 @@ struct page *__pageblock_pfn_to_page(unsigned long start_pfn,
  *
  * -- nyc
  */
+/*
+ * 这里的细分顺序对于 I/O 子系统至关重要。
+ * 请勿在没有充分理由和回归测试的情况下更改此顺序。
+ * 具体来说，由于大块内存被细分，较小块的交付顺序取决于它们在此函数中被细分的顺序。
+ * 根据实际测试，这是影响页面传递到 I/O 子系统顺序的主要因素，
+ * 通过考虑包含一个大内存块的伙伴系统在一系列小分配作用下的行为，这一点也得到了证实。
+ * 这种行为是 sglist 合并成功的关键因素。
+ *
+ * -- nyc
+ */
+/**
+ * expand函数用于将一组连续的空闲页面标记为可分配状态，并添加到空闲列表中。
+ * 这个函数主要用于内存 buddy 系统，在大块内存分配和释放时调用。
+ *
+ * @param zone 指向zone结构体的指针，表示内存区域。
+ * @param page 指向page结构体的指针，表示起始页面。
+ * @param low 最低阶数（最小页面大小的2^low）。
+ * @param high 最高阶数（最大页面大小的2^high）。
+ * @param migratetype 页面迁移类型，用于标记页面类型（如正常内存、DMA内存等）。
+ *
+ * 该函数从最高阶开始向下遍历，将符合条件的页面标记为guard，并在空闲列表中插入。
+ * 如果无法标记为guard，则直接添加到空闲列表中，并设置其阶数。
+ */
 static inline void expand(struct zone *zone, struct page *page,
 	int low, int high, int migratetype)
 {
+	// 计算当前高阶对应的页面数量
 	unsigned long size = 1 << high;
 
+	// 从高阶向低阶遍历
 	while (high > low) {
 		high--;
 		size >>= 1;
+		// 检查当前页面范围是否有效，如果无效则触发断言
 		VM_BUG_ON_PAGE(bad_range(zone, &page[size]), &page[size]);
 
+		// 将页面标记为guard页面，以便后续合并
+		// 如果标记成功，则跳过添加到空闲列表的步骤，继续处理下一个页面
 		/*
 		 * Mark as guard pages (or page), that will allow to
 		 * merge back to allocator when buddy will be freed.
@@ -1468,7 +1513,9 @@ static inline void expand(struct zone *zone, struct page *page,
 		if (set_page_guard(zone, &page[size], high, migratetype))
 			continue;
 
+		// 将页面添加到空闲列表中
 		add_to_free_list(&page[size], zone, high, migratetype);
+		// 设置页面的阶数
 		set_buddy_order(&page[size], high);
 	}
 }
