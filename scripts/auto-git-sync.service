@@ -1,0 +1,7 @@
+[Unit]
+Description=Auto git add/commit/push for linux-comment
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/alex/linux-stable
+ExecStart=/home/alex/linux-stable/scripts/auto_git_sync.sh
