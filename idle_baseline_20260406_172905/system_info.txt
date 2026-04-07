@@ -1,0 +1,27 @@
+==== system ====
+Linux maoweiming 6.6.87.2-microsoft-standard-WSL2 #1 SMP PREEMPT_DYNAMIC Thu Jun  5 18:30:46 UTC 2025 x86_64 x86_64 x86_64 GNU/Linux
+
+==== cmdline ====
+initrd=\initrd.img WSL_ROOT_INIT=1 panic=-1 nr_cpus=18 hv_utils.timesync_implicit=1 console=hvc0 debug pty.legacy_count=0 WSL_ENABLE_CRASH_DUMP=1
+
+==== cpu topology ====
+cpu0: cluster=0 core=0 online=?
+cpu1: cluster=0 core=0 online=1
+cpu10: cluster=10 core=5 online=1
+cpu11: cluster=10 core=5 online=1
+cpu12: cluster=12 core=6 online=1
+cpu13: cluster=12 core=6 online=1
+cpu14: cluster=14 core=7 online=1
+cpu15: cluster=14 core=7 online=1
+cpu16: cluster=16 core=8 online=1
+cpu17: cluster=16 core=8 online=1
+cpu2: cluster=2 core=1 online=1
+cpu3: cluster=2 core=1 online=1
+cpu4: cluster=4 core=2 online=1
+cpu5: cluster=4 core=2 online=1
+cpu6: cluster=6 core=3 online=1
+cpu7: cluster=6 core=3 online=1
+cpu8: cluster=8 core=4 online=1
+cpu9: cluster=8 core=4 online=1
+
+==== cpufreq policies ====
